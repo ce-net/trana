@@ -1,0 +1,39 @@
+[package]
+name = "trana-node"
+description = "The trana distributed backend daemon: serves every trana mesh RPC, persists and gossip-replicates records, places media near callers, and fuses social + compute trust."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "trana-node"
+path = "src/main.rs"
+
+[lib]
+name = "trana_node"
+path = "src/lib.rs"
+
+[dependencies]
+trana-core = { path = "../trana-core" }
+ce-rs.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+# Optional local HTTP gateway (a REST facade over the same engine; off by default).
+axum = { version = "0.7", optional = true }
+
+[features]
+default = []
+gateway = ["dep:axum"]
+
+[dev-dependencies]
+tempfile = "3"
