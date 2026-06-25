@@ -1,0 +1,20 @@
+[package]
+name = "trana-core"
+description = "trana content model, content-addressed records, read-model, and trust math. WASM-clean (no tokio/reqwest/libp2p) so mobile and browser nodes can run it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "trana_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+bincode.workspace = true
+ed25519-dalek.workspace = true
