@@ -1664,6 +1664,7 @@ dependencies = [
  "anyhow",
  "ce-rs",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
  "trana-core",

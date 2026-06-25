@@ -16,7 +16,6 @@
 
 use crate::model::Body;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Errors that can arise validating a record.
 #[derive(Debug, Clone, PartialEq, Eq)]
