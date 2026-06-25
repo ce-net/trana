@@ -27,6 +27,7 @@ futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+directories = "5"
 
 # Optional local HTTP gateway (a REST facade over the same engine; off by default).
 axum = { version = "0.7", optional = true }

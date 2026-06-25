@@ -1,0 +1,117 @@
+//! The mesh service: a [`ce_rs::serve::Handler`] that dispatches every `trana/*` RPC topic.
+//!
+//! The serve loop hands each request to [`TranaService::handle`] with the **authenticated** sender
+//! (`req.from`). That sender is the `author` for any write — a caller can only ever act as itself, so
+//! authorship needs no separate proof. Every reply is a JSON [`Envelope`]; errors come back as
+//! `{ok:false, error}` rather than a dropped connection, so a client's `request` never times out on a
+//! handled-but-failed call.
+
+use ce_rs::serve::{Handler, Request};
+use std::sync::Arc;
+use trana_core::proto::{self, Envelope};
+
+use crate::engine::Engine;
+
+/// The mesh-facing service. Cheap to clone-share via the inner `Arc`.
+#[derive(Clone)]
+pub struct TranaService {
+    engine: Arc<Engine>,
+}
+
+impl TranaService {
+    pub fn new(engine: Arc<Engine>) -> Self {
+        TranaService { engine }
+    }
+
+    /// Dispatch one request to the right engine method, returning the reply envelope bytes.
+    async fn dispatch(&self, req: Request) -> Envelope {
+        let from = req.from.as_str();
+        let p = req.payload.as_slice();
+        match req.topic.as_str() {
+            proto::T_PROFILE_PUT => self.write_reply(parse(p).map(|r| self.engine.profile_put(from, r))).await,
+            proto::T_PROFILE_GET => match parse::<proto::ProfileGetReq>(p) {
+                Ok(r) => env(self.engine.profile_get(&r.node_id).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_MEDIA_PUT => self.write_reply(parse(p).map(|r| self.engine.media_put(from, r))).await,
+            proto::T_MEDIA_GET => match parse::<proto::MediaGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.media_get(&r.media_id)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_POST_CREATE => self.write_reply(parse(p).map(|r| self.engine.post_create(from, r))).await,
+            proto::T_POST_GET => match parse::<proto::PostGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.post_get(&r.id)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_THREADS => match parse::<proto::ThreadsReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.threads(r)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_COMMENTS => match parse::<proto::CommentsReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.comments(r)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_VOTE => match parse::<proto::VoteReq>(p) {
+                Ok(r) => env(self.engine.vote(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_FOLLOW => match parse::<proto::FollowReq>(p) {
+                Ok(r) => env(self.engine.follow(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_KARMA => match parse::<proto::KarmaReq>(p) {
+                Ok(r) => env(self.engine.karma(&r.node_id).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_STREAM_START => self.write_reply(parse(p).map(|r| self.engine.stream_start(from, r))).await,
+            proto::T_STREAM_APPEND => self.write_reply(parse(p).map(|r| self.engine.stream_append(from, r))).await,
+            proto::T_STREAM_END => match parse::<proto::StreamEndReq>(p) {
+                Ok(r) => env(self.engine.stream_end(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_STREAM_GET => match parse::<proto::StreamGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.stream_get(&r.id)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_STREAMS_LIVE => Envelope::ok(&self.engine.streams_live()),
+            proto::T_REPLICATE => Envelope::ok(&self.engine.replicate(p).await),
+            other => Envelope::err(format!("unknown topic: {other}")),
+        }
+    }
+
+    /// Await a write future (already parsed) and wrap its result in an envelope.
+    async fn write_reply<F, T>(&self, parsed: Result<F, String>) -> Envelope
+    where
+        F: std::future::Future<Output = anyhow::Result<T>>,
+        T: serde::Serialize,
+    {
+        match parsed {
+            Ok(fut) => env(fut.await),
+            Err(e) => Envelope::err(e),
+        }
+    }
+}
+
+impl Handler for TranaService {
+    async fn handle(&self, req: Request) -> Vec<u8> {
+        let topic = req.topic.clone();
+        let env = self.dispatch(req).await;
+        if !env.ok {
+            tracing::debug!(topic = %topic, error = ?env.error, "trana: request failed");
+        }
+        env.encode()
+    }
+}
+
+/// Parse a JSON request body, mapping decode errors to a readable string.
+fn parse<T: for<'de> serde::Deserialize<'de>>(bytes: &[u8]) -> Result<T, String> {
+    serde_json::from_slice(bytes).map_err(|e| format!("bad request body: {e}"))
+}
+
+/// Wrap an `anyhow::Result` into an [`Envelope`].
+fn env<T: serde::Serialize>(r: anyhow::Result<T>) -> Envelope {
+    match r {
+        Ok(v) => Envelope::ok(&v),
+        Err(e) => Envelope::err(e.to_string()),
+    }
+}
