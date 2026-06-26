@@ -41,6 +41,18 @@ pub const T_STREAMS_LIVE: &str = "trana/streams/live/v1";
 /// Internal replication RPC: "please pull + pin this record/object".
 pub const T_REPLICATE: &str = "trana/replicate/v1";
 
+// ----- community governance -----
+pub const T_BOARD_PUT: &str = "trana/board/put/v1";
+pub const T_BOARD_GET: &str = "trana/board/get/v1";
+pub const T_BOARDS: &str = "trana/boards/v1";
+pub const T_FEED: &str = "trana/feed/v1";
+pub const T_BANVOTE: &str = "trana/banvote/v1";
+pub const T_BANSTANDING: &str = "trana/banstanding/v1";
+pub const T_POLICY_PROPOSE: &str = "trana/policy/propose/v1";
+pub const T_POLICY_VOTE: &str = "trana/policy/vote/v1";
+pub const T_PROPOSALS: &str = "trana/policy/list/v1";
+pub const T_PROPOSAL_GET: &str = "trana/policy/get/v1";
+
 /// Every request/reply topic a node serves (the pub/sub [`GOSSIP`] topic is subscribed separately).
 pub const RPC_TOPICS: &[&str] = &[
     T_PROFILE_PUT,
@@ -60,6 +72,16 @@ pub const RPC_TOPICS: &[&str] = &[
     T_STREAM_GET,
     T_STREAMS_LIVE,
     T_REPLICATE,
+    T_BOARD_PUT,
+    T_BOARD_GET,
+    T_BOARDS,
+    T_FEED,
+    T_BANVOTE,
+    T_BANSTANDING,
+    T_POLICY_PROPOSE,
+    T_POLICY_VOTE,
+    T_PROPOSALS,
+    T_PROPOSAL_GET,
 ];
 
 /// The reply envelope on every topic. `ok` distinguishes success (decode `data` as the topic's
@@ -325,6 +347,119 @@ pub struct ReplicateReq {
     pub record: crate::record::Record,
     #[serde(default)]
     pub object_cids: Vec<String>,
+}
+
+// ----- community governance -----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardPutReq {
+    pub board: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub policy: crate::model::BoardPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardGetReq {
+    pub board: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardResp {
+    pub board: crate::state::BoardView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardsResp {
+    pub boards: Vec<crate::state::BoardView>,
+}
+
+/// A feed request. `scope` is `board` (needs `board`), `all` (cross-board), or `home` (needs
+/// `viewer` — thread roots from accounts they follow). `sort` is any feed algorithm name
+/// (hot, top, new, best, trending, rising, controversial).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedReq {
+    #[serde(default = "default_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub board: Option<String>,
+    #[serde(default)]
+    pub viewer: Option<String>,
+    #[serde(default = "default_feed_sort")]
+    pub sort: String,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+fn default_scope() -> String {
+    "all".into()
+}
+fn default_feed_sort() -> String {
+    "hot".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanVoteReq {
+    pub board: String,
+    pub target: String,
+    /// true = vote to ban, false = vote to keep / lift.
+    pub support: bool,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanStandingReq {
+    pub board: String,
+    pub target: String,
+}
+
+/// A user's ban standing: the raw community tally plus the node's trust-weighted verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BanStandingResp {
+    pub standing: crate::state::BanStanding,
+    /// Trust-weighted support fraction (0.0–1.0) the node computed.
+    pub weighted_support: f64,
+    /// The node's verdict after trust weighting.
+    pub banned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyProposeReq {
+    #[serde(default)]
+    pub board: Option<String>,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyVoteReq {
+    pub proposal: String,
+    pub support: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalsReq {
+    #[serde(default)]
+    pub board: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalsResp {
+    pub proposals: Vec<crate::state::ProposalView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalGetReq {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalResp {
+    pub proposal: Option<crate::state::ProposalView>,
 }
 
 /// Build the [`Body`] for a profile from a put request.

@@ -128,6 +128,44 @@ impl Store {
     pub fn live_streams(&self) -> Vec<StreamView> {
         self.state.lock().unwrap().live_streams()
     }
+
+    // ----- community governance -----
+
+    pub fn board(&self, board: &str) -> trana_core::state::BoardView {
+        self.state.lock().unwrap().board(board)
+    }
+
+    pub fn boards(&self) -> Vec<trana_core::state::BoardView> {
+        self.state.lock().unwrap().boards()
+    }
+
+    pub fn board_policy(&self, board: &str) -> trana_core::BoardPolicy {
+        self.state.lock().unwrap().board_policy(board)
+    }
+
+    pub fn ban_standing(&self, board: &str, target: &str) -> trana_core::state::BanStanding {
+        self.state.lock().unwrap().ban_standing(board, target)
+    }
+
+    pub fn ban_votes_raw(&self, board: &str, target: &str) -> Vec<(String, bool)> {
+        self.state.lock().unwrap().ban_votes_raw(board, target)
+    }
+
+    pub fn proposal(&self, id: &str) -> Option<trana_core::state::ProposalView> {
+        self.state.lock().unwrap().proposal(id)
+    }
+
+    pub fn proposals(&self, board: Option<&str>) -> Vec<trana_core::state::ProposalView> {
+        self.state.lock().unwrap().proposals(board)
+    }
+
+    pub fn all_feed(&self, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
+        self.state.lock().unwrap().all_feed(sort, limit, now_ms)
+    }
+
+    pub fn home_feed(&self, viewer: &str, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
+        self.state.lock().unwrap().home_feed(viewer, sort, limit, now_ms)
+    }
 }
 
 #[cfg(test)]
