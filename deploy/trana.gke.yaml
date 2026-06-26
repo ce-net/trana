@@ -1,0 +1,55 @@
+# trana — ce-gke Deployment manifest.
+#
+# Declares the trana distributed backend as a self-healing, replicated mesh service. ce-gke places
+# `replicas` copies across docker-capable mesh hosts (best-headroom, spread, fault-domain-aware),
+# keeps that many Running, replaces any that die, and advertises the healthy set on the DHT as
+# `ce-gke/social/trana-api` so clients reach it with `ce_rs::locate` (the trana-sdk default).
+#
+# Apply + keep healed:
+#   ce-gke --grant <cap-token> apply -f trana.gke.yaml
+#   ce-gke run --every 10        # reconcile/heal forever
+#
+# The image must contain the `trana-node` binary and reach a CE node's HTTP API. Build/publish it
+# from this repo (a container that runs `trana-node --node-url <the host's node>`).
+name: trana-node
+namespace: social
+image: ghcr.io/ce-net/trana:0.1.0
+command: [trana-node]
+
+# Four replicas: the social graph gossips to all of them, so any one can serve reads and losing one
+# never loses content. Raise for more read capacity / durability.
+replicas: 4
+
+resources:
+  cpu_cores: 2
+  mem_mb: 512
+
+# Only place on docker-capable hosts.
+select:
+  - docker
+
+# Fund each replica (base units; 10^18 = 1 credit).
+bid: "10000000000000000000"
+duration_secs: 7200
+
+# Liveness: trana-node is healthy iff the CE node API it serves over is answering. ce-gke probes the
+# replica's host agent; a replica failing 3 in a row is replaced.
+liveness:
+  type: http
+  port: 8844
+  path: /status
+  failure_threshold: 3
+  period_secs: 10
+
+readiness:
+  type: tcp
+  port: 8844
+
+# Publish the healthy replica set for discovery: clients locate `ce-gke/social/trana-api`.
+service: trana-api
+
+# Never take the whole service down during an image roll.
+strategy:
+  type: rolling_update
+  max_unavailable: 1
+  max_surge: 1
