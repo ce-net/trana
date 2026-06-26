@@ -127,6 +127,73 @@ enum Cmd {
     },
     /// List currently-live streams.
     StreamsLive,
+
+    // ----- community governance -----
+    /// Create/register a board (community namespace) and its params.
+    BoardCreate {
+        board: String,
+        #[arg(long, default_value = "")]
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Minimum fused trust (0.0-1.0) to post here. 0 = open.
+        #[arg(long, default_value_t = 0.0)]
+        min_trust_post: f64,
+        /// Minimum fused trust (0.0-1.0) to vote here. 0 = open.
+        #[arg(long, default_value_t = 0.0)]
+        min_trust_vote: f64,
+        /// Visibility grace window (seconds) for new posts.
+        #[arg(long, default_value_t = 21600)]
+        grace_secs: u64,
+    },
+    /// Show a board's metadata + params.
+    Board { board: String },
+    /// List boards.
+    Boards,
+    /// Show a feed ranked by any algorithm: hot, top, new, best, trending, rising, controversial.
+    Feed {
+        #[arg(long, default_value = "all")]
+        scope: String,
+        #[arg(long)]
+        board: Option<String>,
+        #[arg(long)]
+        viewer: Option<String>,
+        #[arg(long, default_value = "hot")]
+        sort: String,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Cast a community ban vote on a user (default: vote to ban; --keep to vote to keep).
+    BanVote {
+        board: String,
+        target: String,
+        #[arg(long)]
+        keep: bool,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
+    /// Show a user's community ban standing in a board (raw + trust-weighted).
+    BanStanding { board: String, target: String },
+    /// Propose a community policy (the substrate future AI enforcement applies).
+    Propose {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: String,
+        #[arg(long)]
+        board: Option<String>,
+    },
+    /// Vote on a policy proposal (default: in favor; --against to oppose).
+    PolicyVote {
+        proposal: String,
+        #[arg(long)]
+        against: bool,
+    },
+    /// List policy proposals (optionally scoped to a board).
+    Proposals {
+        #[arg(long)]
+        board: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -297,6 +364,39 @@ async fn main() -> Result<()> {
         Cmd::StreamsLive => {
             print_json(&t.streams_live().await?)?;
         }
+
+        Cmd::BoardCreate { board, title, description, min_trust_post, min_trust_vote, grace_secs } => {
+            let mut policy = trana_core::BoardPolicy::default();
+            policy.min_trust_to_post = min_trust_post;
+            policy.min_trust_to_vote = min_trust_vote;
+            policy.grace_secs = grace_secs;
+            let r = t.board_put(BoardPutReq { board, title, description, policy }).await?;
+            println!("{}", r.id);
+        }
+        Cmd::Board { board } => print_json(&t.board_get(&board).await?)?,
+        Cmd::Boards => print_json(&t.boards().await?)?,
+        Cmd::Feed { scope, board, viewer, sort, limit } => {
+            let viewer = match viewer {
+                Some(v) => Some(v),
+                None if scope == "home" => Some(local_id.clone()),
+                None => None,
+            };
+            print_json(&t.feed(FeedReq { scope, board, viewer, sort, limit }).await?)?;
+        }
+        Cmd::BanVote { board, target, keep, reason } => {
+            t.ban_vote(&board, &target, !keep, &reason).await?;
+            println!("ok");
+        }
+        Cmd::BanStanding { board, target } => print_json(&t.ban_standing(&board, &target).await?)?,
+        Cmd::Propose { title, body, board } => {
+            let r = t.policy_propose(PolicyProposeReq { board, title, body }).await?;
+            println!("{}", r.id);
+        }
+        Cmd::PolicyVote { proposal, against } => {
+            t.policy_vote(&proposal, !against).await?;
+            println!("ok");
+        }
+        Cmd::Proposals { board } => print_json(&t.proposals(board.as_deref()).await?)?,
     }
     Ok(())
 }
