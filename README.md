@@ -23,6 +23,43 @@ likely to hand it critical tasks. The trust formula
 component is exposed, never a black box. The compute half is read straight from CE's on-chain facts
 (`/history`, `/atlas`), so it is economically costly to fake.
 
+## Community governance (no moderators)
+
+trana has **no mods and no owners with removal powers**. Governance is the community: trust-weighted
+voting, trust, and respect. The defining inversion of Reddit:
+
+- **Controversy is given visibility, not buried.** Every new post gets a **grace window** (per-board
+  `grace_secs`, default 6h) during which the default feed ranks it by *engagement* (ups + downs,
+  sign-agnostic) — so a dissenting or unpopular take gets *seen* first, with a real chance to persuade
+  people or find the ones who already agree. Only **after** the window does net reception take over,
+  so sustained approval persists and sustained "booing" fades.
+- **Banning is a community vote.** A `BanVote` is one-person-one-vote; a ban takes effect only when it
+  clears the board's **trust-weighted support fraction** (`ban_support`, default 0.66) *and* a
+  distinct-voter **quorum** (`ban_quorum`, default 10). Reversible if the community changes its mind.
+  A banned user's content is hidden and they can't post/comment/vote in that board.
+- **Trust gates participation.** Boards can require a minimum fused trust to post or vote
+  (`min_trust_to_post` / `min_trust_to_vote`, default 0 = open) — the sybil-resistance lever, using
+  the costly-to-fake on-chain compute trust. Ban votes are weighted by social standing ("respect").
+- **Policies are voted forward by people** (`PolicyProposal` / `PolicyVote`) — the substrate a future
+  AI policy layer will enforce. People decide the rules; AI applies them.
+
+## The feed algorithm
+
+One enum, seven rankings (all in `trana_core::state`):
+
+| Sort | What it surfaces |
+|---|---|
+| `hot` (default) | the grace-aware community feed above — controversy gets a chance, then reception decides |
+| `new` | newest first |
+| `top` | highest net score (pure reception) |
+| `best` | Wilson lower-bound confidence — *how confidently liked*, robust to sample size |
+| `trending` | velocity: engagement decayed steeply by age — what's blowing up now |
+| `rising` | young posts gaining traction fast (score + replies per early hour) |
+| `controversial` | high engagement that's split — the fights |
+
+Available per-board, cross-board (`all`), or as a personalized `home` feed (thread roots from accounts
+you follow).
+
 ## Architecture
 
 Four crates, mirroring the CE mesh-app pattern (mesh-native RPC, content-addressed blobs, `locate`
