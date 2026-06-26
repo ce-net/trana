@@ -133,6 +133,11 @@ impl Store {
         self.state.lock().unwrap().board_creators()
     }
 
+    /// Has `device` confirmed (via a signed `DeviceLink`) that it belongs to `owner`?
+    pub fn is_device_linked(&self, owner: &str, device: &str) -> bool {
+        self.state.lock().unwrap().is_device_linked(owner, device)
+    }
+
     pub fn media(&self, media_id: &str) -> Option<Media> {
         self.state.lock().unwrap().media(media_id)
     }

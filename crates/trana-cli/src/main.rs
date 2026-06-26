@@ -85,6 +85,13 @@ enum Cmd {
         #[arg(long)]
         unfollow: bool,
     },
+    /// Link this device to an owner (run from the device — consents to roll its compute into the
+    /// owner's trust). `--unlink` revokes.
+    LinkDevice {
+        owner: String,
+        #[arg(long)]
+        unlink: bool,
+    },
     /// List threads in a board.
     Threads {
         board: String,
@@ -314,6 +321,10 @@ async fn main() -> Result<()> {
         }
         Cmd::Follow { node_id, unfollow } => {
             t.follow(&node_id, !unfollow).await?;
+            println!("ok");
+        }
+        Cmd::LinkDevice { owner, unlink } => {
+            t.link_device(&owner, !unlink).await?;
             println!("ok");
         }
         Cmd::Threads { board, sort, limit } => {

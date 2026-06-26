@@ -1,7 +1,6 @@
 # Trust roadmap: web-of-trust, trust-weighted voting, decay
 
-Status: **P0b, P1, P2, P3 implemented** (2026-06-26). P0a (device-binding) and P5 (personalized
-PPR) remain. This extends the existing trust system (`trana-core/src/karma.rs`,
+Status: **P0a, P0b, P1, P2, P3 implemented** (2026-06-26). Only P5 (personalized PPR) remains. This extends the existing trust system (`trana-core/src/karma.rs`,
 `trana-core/src/state.rs`, `trana-node/src/engine.rs`) without breaking the append-only log or the
 convergence guarantee.
 
@@ -172,7 +171,7 @@ edges by age (reuse Feature 1's `decay`), keep the compute seed weighted heavily
 
 | Phase | Status | Scope | Touches |
 |-------|--------|-------|---------|
-| **P0a** | TODO | Device-binding fix (prereq for trusting compute as a *seed*) | new `DeviceClaim` body + fold + `device_set` filter |
+| **P0a** | DONE | Mutual device binding: the device signs `DeviceLink{owner}`; compute rolls up only when the owner's `Profile.devices` AND the device's link agree | `DeviceLink` body + fold + `State::is_device_linked` + `Engine::device_set` filter + `trana/device/link/v1` RPC (SDK `link_device`, CLI `link-device`) |
 | **P0b** | DONE | Vote timestamps + reverse index | `target_votes`, `apply_vote`, tests |
 | **P1** | DONE | Decay: `decay`, `Weights.half_life_secs`, `now_ms` plumbed | core + engine |
 | **P2** | DONE | `weighted_score` + `social_weighted` effective karma | core + engine |
@@ -184,9 +183,9 @@ edges by age (reuse Feature 1's `decay`), keep the compute seed weighted heavily
 - Set `TRANA_TRUST_ROOTS` (comma-separated node ids) on each node to a shared anchor set so global
   ranks converge and sybil resistance is real; with no roots the graph falls back to a uniform
   restart over board creators (weaker, still useful for ranking).
-- Seeds today are **board creators + configured roots**, not compute-trust nodes — so P0a is *not*
-  blocking this release. Switching/adding compute-trust seeding is the P0a follow-up (it requires the
-  device-binding fix first, or self-declared `Profile.devices` would forge the seed).
+- Seeds today are **board creators + configured roots**, not compute-trust nodes. With P0a done
+  (mutual device binding), self-declared `Profile.devices` can no longer forge a device's compute, so
+  compute-trust is now safe to add as an additional seed — the remaining follow-up to `rank_snapshot`.
 - Decay uses each node's wall-clock `now_ms`, so two nodes' *trust scores* can differ by seconds of
   decay. The convergent content-hiding decision still uses the raw `banned_raw` tally, so this drift
   never causes nodes to disagree on what is hidden.

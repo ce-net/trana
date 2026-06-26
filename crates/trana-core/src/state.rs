@@ -8,8 +8,8 @@
 //! the backend genuinely distributed rather than a single source of truth.
 
 use crate::model::{
-    BanVote, BoardCreate, BoardPolicy, Body, Document, FileRef, Media, PolicyProposal, PolicyVote,
-    Post, Profile, Ref, StreamSegment, StreamStart,
+    BanVote, BoardCreate, BoardPolicy, Body, DeviceLink, Document, FileRef, Media, PolicyProposal,
+    PolicyVote, Post, Profile, Ref, StreamSegment, StreamStart,
 };
 use crate::karma::decay;
 use crate::record::Record;
@@ -246,6 +246,11 @@ pub struct State {
     proposals: HashMap<String, (String, u64, PolicyProposal)>,
     /// proposal id -> (voter -> support).
     policy_votes: HashMap<String, HashMap<String, bool>>,
+
+    /// device (the record author) -> (claimed owner, active, created_ms). The device's own signed
+    /// consent to belong to an owner; last-write-wins. Combined with the owner's `Profile.devices`
+    /// to gate compute-trust roll-up (see [`State::is_device_linked`]).
+    device_links: HashMap<String, (String, bool, u64)>,
 }
 
 impl State {
@@ -293,8 +298,19 @@ impl State {
                 self.proposals.insert(r.id.clone(), (r.author.clone(), r.created_ms, p.clone()));
             }
             Body::PolicyVote(v) => self.apply_policy_vote(&r.author, v),
+            Body::DeviceLink(d) => self.apply_device_link(&r.author, r.created_ms, d),
         }
         true
+    }
+
+    fn apply_device_link(&mut self, device: &str, created_ms: u64, d: &DeviceLink) {
+        match self.device_links.get(device) {
+            Some((_, _, prev)) if *prev >= created_ms => {} // older or equal: ignore (LWW).
+            _ => {
+                self.device_links
+                    .insert(device.to_string(), (d.owner.clone(), d.active, created_ms));
+            }
+        }
     }
 
     fn apply_profile(&mut self, author: &str, created_ms: u64, p: &Profile) {
@@ -934,6 +950,13 @@ impl State {
         self.social_weighted(node_id, 0, 0, &|_| 1.0)
     }
 
+    /// Has `device` published an active [`crate::model::DeviceLink`] declaring it belongs to `owner`?
+    /// This is the device's half of the mutual binding; the owner's half is listing the device in
+    /// their `Profile.devices`. Only when both hold does the device's compute count toward `owner`.
+    pub fn is_device_linked(&self, owner: &str, device: &str) -> bool {
+        matches!(self.device_links.get(device), Some((o, active, _)) if *active && o == owner)
+    }
+
     /// Author of every explicitly-created board (deduplicated) — the in-log, deterministic seed set
     /// for [`State::trust_graph`]: the people the community let bootstrap its spaces.
     pub fn board_creators(&self) -> Vec<String> {
@@ -1419,6 +1442,31 @@ mod tests {
         assert_eq!(s.followers(&b), vec![a.clone()]);
         s.apply(&Record::new(&a, 2, Body::Follow(Follow { followee: b.clone(), active: false })).unwrap());
         assert!(!s.is_following(&a, &b));
+    }
+
+    #[test]
+    fn device_link_requires_device_consent() {
+        use crate::model::DeviceLink;
+        let mut s = State::new();
+        let owner = "aa".repeat(32);
+        let device = "bb".repeat(32);
+        let link = |owner: &str, active: bool, t: u64| {
+            Record::new(&device, t, Body::DeviceLink(DeviceLink { owner: owner.into(), active }))
+                .unwrap()
+        };
+        // A profile naming a device is not enough — without the device's own link it stays unbound.
+        assert!(!s.is_device_linked(&owner, &device));
+        // The device signs its consent (author = device).
+        s.apply(&link(&owner, true, 5));
+        assert!(s.is_device_linked(&owner, &device));
+        // The device only consented to `owner`; it is not bound to anyone else.
+        assert!(!s.is_device_linked(&"cc".repeat(32), &device));
+        // The device can revoke (last-write-wins by time)...
+        s.apply(&link(&owner, false, 6));
+        assert!(!s.is_device_linked(&owner, &device));
+        // ...and a stale older re-link must not resurrect the binding.
+        s.apply(&link(&owner, true, 4));
+        assert!(!s.is_device_linked(&owner, &device));
     }
 
     #[test]

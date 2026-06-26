@@ -32,6 +32,7 @@ pub const T_THREADS: &str = "trana/threads/v1";
 pub const T_COMMENTS: &str = "trana/comments/v1";
 pub const T_VOTE: &str = "trana/vote/v1";
 pub const T_FOLLOW: &str = "trana/follow/v1";
+pub const T_DEVICE_LINK: &str = "trana/device/link/v1";
 pub const T_KARMA: &str = "trana/karma/v1";
 pub const T_STREAM_START: &str = "trana/stream/start/v1";
 pub const T_STREAM_APPEND: &str = "trana/stream/append/v1";
@@ -74,6 +75,7 @@ pub const RPC_TOPICS: &[&str] = &[
     T_COMMENTS,
     T_VOTE,
     T_FOLLOW,
+    T_DEVICE_LINK,
     T_KARMA,
     T_STREAM_START,
     T_STREAM_APPEND,
@@ -286,6 +288,17 @@ pub struct VoteReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FollowReq {
     pub followee: String,
+    pub active: bool,
+}
+
+/// Publish this device's consent to belong to `owner`. The caller (authenticated sender) is the
+/// device; only the device can sign its own link, which is what makes the binding mutual.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceLinkReq {
+    /// The NodeId this device declares it belongs to.
+    pub owner: String,
+    /// Whether the link is active (`false` unlinks). Defaults to `true`.
+    #[serde(default = "crate::model::default_true")]
     pub active: bool,
 }
 

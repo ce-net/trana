@@ -40,6 +40,8 @@ pub enum Body {
     PolicyProposal(PolicyProposal),
     /// Vote a policy proposal up or down.
     PolicyVote(PolicyVote),
+    /// A device's signed confirmation that it belongs to an owner (last-write-wins per device).
+    DeviceLink(DeviceLink),
 }
 
 impl Body {
@@ -59,8 +61,28 @@ impl Body {
             Body::BanVote(_) => "ban_vote",
             Body::PolicyProposal(_) => "policy_proposal",
             Body::PolicyVote(_) => "policy_vote",
+            Body::DeviceLink(_) => "device_link",
         }
     }
+}
+
+/// A device's signed confirmation that it belongs to `owner`. The record **author is the device**,
+/// so this is the device's own consent. Pairing it with the owner's [`Profile::devices`] listing
+/// that device is a *mutual* binding: a profile cannot roll a high-reputation node's compute into its
+/// own trust by merely naming it — the device must also point back. Last-write-wins per device, so a
+/// device has at most one current owner and can unlink with `active = false`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceLink {
+    /// The NodeId this device declares it is owned by.
+    pub owner: String,
+    /// Whether the link is currently asserted (`false` unlinks).
+    #[serde(default = "crate::model::default_true")]
+    pub active: bool,
+}
+
+/// serde default for boolean fields that should default to `true`.
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// A user's profile. The user is the record author (a NodeId); a person may own several devices, so

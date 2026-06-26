@@ -104,6 +104,22 @@ impl Engine {
         }
     }
 
+    /// The device set whose compute rolls up for a profile: the node itself, plus each *declared*
+    /// device (`Profile.devices`) that has **also** published a matching `DeviceLink` back. The
+    /// two-signature, mutual binding is what stops a profile inheriting a high-reputation node's
+    /// compute trust by merely naming it — the device must consent (and can revoke).
+    fn device_set(&self, node_id: &str, declared: Option<&Vec<String>>) -> Vec<String> {
+        let mut set = vec![node_id.to_string()];
+        if let Some(devs) = declared {
+            for d in devs {
+                if d != node_id && !set.contains(d) && self.store.is_device_linked(node_id, d) {
+                    set.push(d.clone());
+                }
+            }
+        }
+        set
+    }
+
     /// A voter's weight for community ban tallying. Uses the web-of-trust rank (with a small floor so
     /// engaged-but-unranked members still count toward a community verdict); falls back to the cheap
     /// karma-based curve only when no graph exists at all.
@@ -167,7 +183,7 @@ impl Engine {
     async fn trust_of(&self, node_id: &str) -> f64 {
         let rank = self.rank_snapshot();
         let social = self.weighted_social(node_id, &rank);
-        let devices = device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
+        let devices = self.device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
         trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights).combined
     }
@@ -206,7 +222,7 @@ impl Engine {
         let profile = self.store.profile(node_id);
         let rank = self.rank_snapshot();
         let social = self.weighted_social(node_id, &rank);
-        let devices = device_set(node_id, profile.as_ref().map(|p| &p.profile.devices));
+        let devices = self.device_set(node_id, profile.as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
         let trust = trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights);
         Ok(ProfileResp { profile, social, compute, trust })
@@ -296,12 +312,26 @@ impl Engine {
         Ok(OkResp { ok: true })
     }
 
+    /// Publish this device's consent to belong to `owner` (the device's half of the mutual binding).
+    /// The author is the device itself; only when `owner` also lists this device in their profile does
+    /// the device's compute roll into `owner`'s trust.
+    pub async fn device_link(&self, author: &str, req: DeviceLinkReq) -> Result<OkResp> {
+        self.write(
+            author,
+            Body::DeviceLink(trana_core::model::DeviceLink { owner: req.owner, active: req.active }),
+            vec![],
+            0,
+        )
+        .await?;
+        Ok(OkResp { ok: true })
+    }
+
     // ----- karma -----
 
     pub async fn karma(&self, node_id: &str) -> Result<KarmaResp> {
         let rank = self.rank_snapshot();
         let social = self.weighted_social(node_id, &rank);
-        let devices = device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
+        let devices = self.device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
         let trust = trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights);
         Ok(KarmaResp { social, compute, trust })
@@ -506,20 +536,6 @@ impl Engine {
         let ok = crate::replicate::ingest_replication(&self.store, &self.replicator, payload).await;
         OkResp { ok }
     }
-}
-
-/// The device set whose compute we roll up for a profile: the node itself plus any extra devices it
-/// declares. Deduplicated, with the primary node always included.
-fn device_set(node_id: &str, declared: Option<&Vec<String>>) -> Vec<String> {
-    let mut set = vec![node_id.to_string()];
-    if let Some(devs) = declared {
-        for d in devs {
-            if d != node_id && !set.contains(d) {
-                set.push(d.clone());
-            }
-        }
-    }
-    set
 }
 
 /// Build a [`ComputeTrust`] for a single node directly (used by tests / simple callers).

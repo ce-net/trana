@@ -66,6 +66,10 @@ impl TranaService {
                 Ok(r) => env(self.engine.follow(from, r).await),
                 Err(e) => Envelope::err(e),
             },
+            proto::T_DEVICE_LINK => match parse::<proto::DeviceLinkReq>(p) {
+                Ok(r) => env(self.engine.device_link(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
             proto::T_KARMA => match parse::<proto::KarmaReq>(p) {
                 Ok(r) => env(self.engine.karma(&r.node_id).await),
                 Err(e) => Envelope::err(e),

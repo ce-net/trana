@@ -184,6 +184,12 @@ impl TranaClient {
         self.call(proto::T_FOLLOW, &proto::FollowReq { followee: followee.into(), active }).await
     }
 
+    /// Publish this device's consent to belong to `owner` (the device half of the mutual binding
+    /// that lets the owner's profile roll up this device's compute trust). Call from the device.
+    pub async fn link_device(&self, owner: &str, active: bool) -> Result<proto::OkResp> {
+        self.call(proto::T_DEVICE_LINK, &proto::DeviceLinkReq { owner: owner.into(), active }).await
+    }
+
     // ----- karma / trust -----
 
     pub async fn karma(&self, node_id: &str) -> Result<proto::KarmaResp> {
