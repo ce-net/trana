@@ -11,15 +11,24 @@ use crate::model::{Body, Media, Post, Profile, StreamSegment, StreamStart};
 use crate::record::Record;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// How to order a list of threads/comments.
+/// How to rank a feed of threads/comments. The feed algorithm in one enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
     /// Newest first.
     New,
     /// Highest net score (ups - downs) first.
     Top,
-    /// Score discounted by age (a simple Reddit-like hotness).
+    /// Reddit-style hotness: sign-aware log score minus an age penalty (~12h scale).
     Hot,
+    /// Wilson lower-bound confidence — "best": ranks by how confidently liked, not raw score, so a
+    /// 9/10 beats a 40/50. Robust to small samples.
+    Best,
+    /// Velocity: total engagement decayed steeply by age — what is blowing up *right now*.
+    Trending,
+    /// Young posts gaining traction fast (score + replies per hour since posting).
+    Rising,
+    /// High engagement that is split (lots of both up and down votes) — the fights.
+    Controversial,
 }
 
 impl SortBy {
@@ -28,6 +37,10 @@ impl SortBy {
         match s.to_ascii_lowercase().as_str() {
             "new" => SortBy::New,
             "top" => SortBy::Top,
+            "best" => SortBy::Best,
+            "trending" => SortBy::Trending,
+            "rising" => SortBy::Rising,
+            "controversial" | "contro" => SortBy::Controversial,
             _ => SortBy::Hot,
         }
     }

@@ -30,6 +30,14 @@ pub enum Body {
     StreamSegment(StreamSegment),
     /// End a live stream, optionally publishing a full recording object.
     StreamEnd(StreamEnd),
+    /// Claim/configure a board. First claim of a name wins; its author is the board owner.
+    BoardCreate(BoardCreate),
+    /// Owner grants or revokes a moderator on a board.
+    ModGrant(ModGrant),
+    /// A moderator/owner action on a board (remove, lock, pin, ban, ...).
+    ModAction(ModAction),
+    /// A user reports a post/comment/user for moderator attention.
+    Report(Report),
 }
 
 impl Body {
@@ -44,6 +52,10 @@ impl Body {
             Body::StreamStart(_) => "stream_start",
             Body::StreamSegment(_) => "stream_segment",
             Body::StreamEnd(_) => "stream_end",
+            Body::BoardCreate(_) => "board_create",
+            Body::ModGrant(_) => "mod_grant",
+            Body::ModAction(_) => "mod_action",
+            Body::Report(_) => "report",
         }
     }
 }
@@ -225,4 +237,101 @@ pub struct StreamEnd {
     /// Optional CE object CID of the full recording (for replay after the live edge ends).
     #[serde(default)]
     pub recording_cid: Option<String>,
+}
+
+// =============================== governance / moderation ===============================
+//
+// trana's moderation is HYBRID and capability-shaped, with NO global admin:
+//   - a board is an owned object (first claim of a name wins; the author is the owner);
+//   - the owner delegates moderators via [`ModGrant`]; mods/owner act via [`ModAction`];
+//   - every action is a signed, content-addressed record, so any node verifies the authority
+//     chain and honors it by default — while still keeping a local policy override (node
+//     sovereignty) and trust-gating who may vote/post (sybil resistance).
+
+/// Per-board policy knobs. Trust thresholds are checked at write time by the node (it knows the
+/// caller's fused trust); the read-model carries the policy so any node enforces the same rules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardPolicy {
+    /// Minimum fused trust (0.0–1.0) required to create a post/comment. 0 = open.
+    #[serde(default)]
+    pub min_trust_to_post: f64,
+    /// Minimum fused trust (0.0–1.0) required to up/down vote. 0 = open.
+    #[serde(default)]
+    pub min_trust_to_vote: f64,
+    /// If true, only the owner and moderators may post (an announce-only board).
+    #[serde(default)]
+    pub restricted_posting: bool,
+}
+
+impl Default for BoardPolicy {
+    fn default() -> Self {
+        BoardPolicy { min_trust_to_post: 0.0, min_trust_to_vote: 0.0, restricted_posting: false }
+    }
+}
+
+/// Claim and/or (re)configure a board. The first claim of a board name wins and fixes the owner;
+/// later `BoardCreate`s from the **owner** update the title/description/policy (last-write-wins).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoardCreate {
+    pub board: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub policy: BoardPolicy,
+}
+
+/// The owner grants or revokes a moderator on a board. Only honored when authored by the board owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModGrant {
+    pub board: String,
+    /// The NodeId being made (or unmade) a moderator.
+    pub moderator: String,
+    /// `true` grant, `false` revoke.
+    pub active: bool,
+}
+
+/// What a moderator/owner does. Each is authorized iff the record author owns or mods the board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ModActionKind {
+    /// Hide a post/comment from listings (reversible).
+    RemovePost { post: String },
+    /// Un-hide a previously removed post/comment.
+    RestorePost { post: String },
+    /// Stop a thread accepting new comments.
+    LockThread { root: String },
+    /// Re-open a locked thread.
+    UnlockThread { root: String },
+    /// Pin a thread to the top of the board.
+    PinThread { root: String },
+    /// Unpin a thread.
+    UnpinThread { root: String },
+    /// Ban a user from the board until `until_ms` (0 = permanent). Their content is hidden and they
+    /// cannot post/comment/vote in the board.
+    BanUser { user: String, #[serde(default)] until_ms: u64 },
+    /// Lift a ban.
+    UnbanUser { user: String },
+}
+
+/// A moderator/owner action on a board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModAction {
+    pub board: String,
+    pub kind: ModActionKind,
+    /// Free-text reason / mod note (shown in the mod log).
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// A user-filed report against a post/comment (or a user) for moderator attention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Report {
+    /// The board the report is filed in (mods of that board see it).
+    pub board: String,
+    /// The reported record id (a post/comment id) or NodeId (a user).
+    pub target: String,
+    #[serde(default)]
+    pub reason: String,
 }
