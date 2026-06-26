@@ -179,6 +179,50 @@ export interface ProposalView {
   against: number;
 }
 
+// ----- content addressing + documents + versioning -----
+
+export type RefKind = "post" | "document" | "media" | "stream" | "profile" | "board" | "blob";
+
+export interface Ref {
+  kind: RefKind;
+  id: string;
+}
+
+export interface FileRef {
+  object_cid: string;
+  mime: string;
+  size: number;
+  name: string;
+}
+
+export interface DocumentView {
+  id: string;
+  author: NodeId;
+  created_ms: number;
+  title: string;
+  body: string;
+  file: FileRef | null;
+  board: string | null;
+  /** Forward references this document makes, as `trana://...` URIs. */
+  refs: string[];
+  /** Backlinks: `trana://...` URIs that reference this document. */
+  referenced_by: string[];
+  series: string;
+  prev: string | null;
+  version: number;
+  versions: number;
+  is_latest: boolean;
+  ups: number;
+  downs: number;
+  score: number;
+}
+
+export interface DiffLine {
+  /** `" "` context, `"-"` removed, `"+"` added. */
+  op: string;
+  text: string;
+}
+
 /** The reply envelope on every mesh RPC. */
 export interface Envelope {
   ok: boolean;

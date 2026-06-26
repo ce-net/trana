@@ -9,6 +9,9 @@ import type {
   BanStandingResp,
   BoardPolicy,
   BoardView,
+  DiffLine,
+  DocumentView,
+  FileRef,
   KarmaResp,
   Media,
   MediaKind,
@@ -17,6 +20,7 @@ import type {
   PostView,
   ProfileResp,
   ProposalView,
+  Ref,
   Sort,
   StreamKind,
   StreamView,
@@ -52,7 +56,46 @@ const T = {
   policyVote: "trana/policy/vote/v1",
   proposals: "trana/policy/list/v1",
   proposalGet: "trana/policy/get/v1",
+  docPut: "trana/document/put/v1",
+  docGet: "trana/document/get/v1",
+  docsBy: "trana/documents/by/v1",
+  backlinks: "trana/backlinks/v1",
+  docHistory: "trana/document/history/v1",
+  docLatest: "trana/document/latest/v1",
+  docDiff: "trana/document/diff/v1",
 } as const;
+
+/** Parse / format `trana://<kind>/<id>` content references. */
+export const ref = {
+  parse(uri: string): import("./types.js").Ref | null {
+    const rest = uri.startsWith("trana://") ? uri.slice("trana://".length) : null;
+    if (!rest) return null;
+    const slash = rest.indexOf("/");
+    if (slash < 0) return null;
+    const kind = rest.slice(0, slash);
+    const id = rest.slice(slash + 1);
+    if (!id) return null;
+    const kinds = ["post", "document", "media", "stream", "profile", "board", "blob"];
+    return kinds.includes(kind) ? ({ kind: kind as import("./types.js").RefKind, id }) : null;
+  },
+  format(kind: import("./types.js").RefKind, id: string): string {
+    return `trana://${kind}/${id}`;
+  },
+  /** Extract every trana:// reference embedded in a markdown body. */
+  extract(markdown: string): import("./types.js").Ref[] {
+    const out: import("./types.js").Ref[] = [];
+    const seen = new Set<string>();
+    const re = /trana:\/\/[A-Za-z0-9/_-]+/g;
+    for (const m of markdown.matchAll(re)) {
+      const r = ref.parse(m[0]);
+      if (r && !seen.has(`${r.kind}/${r.id}`)) {
+        seen.add(`${r.kind}/${r.id}`);
+        out.push(r);
+      }
+    }
+    return out;
+  },
+};
 
 export interface ProfileInput {
   handle?: string;
@@ -291,6 +334,92 @@ export class Trana {
       this.client.call(T.proposals, { board: board ?? null }),
     get: (id: string): Promise<{ proposal: ProposalView | null }> => this.client.call(T.proposalGet, { id }),
   };
+
+  // ----- documents + files + versioning -----
+  readonly documents = {
+    /** Create a new document (markdown and/or a file). Omit series/prev for a fresh document. */
+    create: (d: {
+      title: string;
+      body?: string;
+      file?: FileRef;
+      refs?: Ref[];
+      board?: string;
+    }): Promise<{ id: string }> =>
+      this.client.call(T.docPut, {
+        title: d.title,
+        body: d.body ?? "",
+        file: d.file ?? null,
+        refs: d.refs ?? [],
+        board: d.board ?? null,
+        series: null,
+        prev: null,
+      }),
+    /** Publish a new VERSION of an existing document (pass its series + current latest id as prev). */
+    update: (
+      series: string,
+      prev: string,
+      d: { title: string; body?: string; file?: FileRef; refs?: Ref[]; board?: string },
+    ): Promise<{ id: string }> =>
+      this.client.call(T.docPut, {
+        title: d.title,
+        body: d.body ?? "",
+        file: d.file ?? null,
+        refs: d.refs ?? [],
+        board: d.board ?? null,
+        series,
+        prev,
+      }),
+    /** Upload a file's bytes and create a document wrapping it (PDF, dataset, binary, ...). */
+    addFile: async (
+      title: string,
+      mime: string,
+      bytes: Uint8Array,
+      opts: { name?: string; board?: string } = {},
+    ): Promise<{ id: string }> => {
+      const objectCid = await this.client.putObject(bytes);
+      const file: FileRef = { object_cid: objectCid, mime, size: bytes.length, name: opts.name ?? title };
+      return this.documents.create({ title, file, board: opts.board });
+    },
+    get: (id: string): Promise<{ document: DocumentView | null }> => this.client.call(T.docGet, { id }),
+    /** Full version history (pass any version id or the series id), oldest -> newest. */
+    history: (key: string): Promise<{ documents: DocumentView[] }> => this.client.call(T.docHistory, { key }),
+    latest: (key: string): Promise<{ document: DocumentView | null }> => this.client.call(T.docLatest, { key }),
+    diff: (from: string, to: string): Promise<{ diff: DiffLine[] }> => this.client.call(T.docDiff, { from, to }),
+    by: (author: NodeId): Promise<{ documents: DocumentView[] }> => this.client.call(T.docsBy, { author }),
+    /** Download a file document's bytes. */
+    download: async (id: string): Promise<Uint8Array> => {
+      const { document } = await this.documents.get(id);
+      if (!document?.file) throw new Error(`document ${id} has no file payload`);
+      return this.client.getObject(document.file.object_cid);
+    },
+  };
+
+  /** `trana://...` URIs that reference content `id` (backlinks). */
+  backlinks(id: string): Promise<{ uris: string[] }> {
+    return this.client.call(T.backlinks, { id });
+  }
+
+  /** Resolve a `trana://<kind>/<id>` reference to its content (typed get per kind). */
+  async resolve(uri: string): Promise<unknown> {
+    const r = ref.parse(uri);
+    if (!r) throw new Error(`not a trana:// ref: ${uri}`);
+    switch (r.kind) {
+      case "post":
+        return this.posts.get(r.id);
+      case "document":
+        return this.documents.get(r.id);
+      case "media":
+        return this.media.get(r.id);
+      case "stream":
+        return this.streams.get(r.id);
+      case "profile":
+        return this.profile.get(r.id);
+      case "board":
+        return this.boards.get(r.id);
+      case "blob":
+        return { cid: r.id };
+    }
+  }
 }
 
 export default Trana;

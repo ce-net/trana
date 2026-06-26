@@ -25,6 +25,9 @@
 //! # Ok(()) }
 //! ```
 
+pub mod platform;
+pub use platform::{Platform, Profile};
+
 use anyhow::{anyhow, Result};
 use ce_rs::locate::LocateOpts;
 use ce_rs::CeClient;
@@ -233,5 +236,56 @@ impl TranaClient {
 
     pub async fn proposal(&self, id: &str) -> Result<proto::ProposalResp> {
         self.call(proto::T_PROPOSAL_GET, &proto::ProposalGetReq { id: id.into() }).await
+    }
+
+    // ----- documents + versioning -----
+
+    /// Create a document or publish a new version (set `series` + `prev`). For a file/PDF/binary,
+    /// upload the bytes with [`upload`](Self::upload) first and pass a `file`.
+    pub async fn document_put(&self, req: proto::DocPutReq) -> Result<proto::IdResp> {
+        self.call(proto::T_DOC_PUT, &req).await
+    }
+
+    pub async fn document_get(&self, id: &str) -> Result<proto::DocResp> {
+        self.call(proto::T_DOC_GET, &proto::DocGetReq { id: id.into() }).await
+    }
+
+    /// Full version history of a document (pass any version id or the series id), oldest -> newest.
+    pub async fn document_history(&self, key: &str) -> Result<proto::DocsResp> {
+        self.call(proto::T_DOC_HISTORY, &proto::DocKeyReq { key: key.into() }).await
+    }
+
+    pub async fn document_latest(&self, key: &str) -> Result<proto::DocResp> {
+        self.call(proto::T_DOC_LATEST, &proto::DocKeyReq { key: key.into() }).await
+    }
+
+    /// A unified line diff between two document versions.
+    pub async fn document_diff(&self, from: &str, to: &str) -> Result<proto::DocDiffResp> {
+        self.call(proto::T_DOC_DIFF, &proto::DocDiffReq { from: from.into(), to: to.into() }).await
+    }
+
+    pub async fn documents_by(&self, author: &str) -> Result<proto::DocsResp> {
+        self.call(proto::T_DOCS_BY, &proto::DocsByReq { author: author.into() }).await
+    }
+
+    /// `trana://...` URIs that reference content `id` (backlinks).
+    pub async fn backlinks(&self, id: &str) -> Result<proto::BacklinksResp> {
+        self.call(proto::T_BACKLINKS, &proto::BacklinksReq { id: id.into() }).await
+    }
+
+    /// Resolve a `trana://<kind>/<id>` reference to its content (the typed get for that kind).
+    /// Returns the raw JSON value so a caller can handle any kind uniformly.
+    pub async fn resolve(&self, uri: &str) -> Result<serde_json::Value> {
+        use trana_core::model::RefKind;
+        let r = trana_core::Ref::parse(uri).ok_or_else(|| anyhow!("not a trana:// ref: {uri}"))?;
+        match r.kind {
+            RefKind::Post => Ok(serde_json::to_value(self.post_get(&r.id).await?)?),
+            RefKind::Document => Ok(serde_json::to_value(self.document_get(&r.id).await?)?),
+            RefKind::Media => Ok(serde_json::to_value(self.media_get(&r.id).await?)?),
+            RefKind::Stream => Ok(serde_json::to_value(self.stream_get(&r.id).await?)?),
+            RefKind::Profile => Ok(serde_json::to_value(self.profile_get(&r.id).await?)?),
+            RefKind::Board => Ok(serde_json::to_value(self.board_get(&r.id).await?)?),
+            RefKind::Blob => Ok(serde_json::json!({ "cid": r.id })),
+        }
     }
 }
