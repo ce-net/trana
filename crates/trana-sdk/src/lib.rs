@@ -192,6 +192,18 @@ impl TranaClient {
 
     // ----- karma / trust -----
 
+    /// Personalized web-of-trust ranks from `viewer`'s perspective (feed personalization). Pass an
+    /// explicit `nodes` list to score those, or empty to get the viewer's top-ranked nodes.
+    pub async fn personal_trust(
+        &self,
+        viewer: &str,
+        nodes: Vec<String>,
+        limit: usize,
+    ) -> Result<proto::PersonalTrustResp> {
+        self.call(proto::T_TRUST_GRAPH, &proto::PersonalTrustReq { viewer: viewer.into(), nodes, limit })
+            .await
+    }
+
     pub async fn karma(&self, node_id: &str) -> Result<proto::KarmaResp> {
         self.call(proto::T_KARMA, &proto::KarmaReq { node_id: node_id.into() }).await
     }

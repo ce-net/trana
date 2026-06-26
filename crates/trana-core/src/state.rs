@@ -1344,6 +1344,30 @@ mod tests {
     }
 
     #[test]
+    fn trust_graph_is_personalized_by_seed() {
+        // Two disjoint follow stars. Seeding from Alice trusts who Alice follows, not who Bob does,
+        // and vice versa — the personalized-PageRank property P5 (personal_trust) relies on.
+        let mut s = State::new();
+        let alice = "a1".repeat(32);
+        let bob = "b2".repeat(32);
+        let alice_friend = "a5".repeat(32);
+        let bob_friend = "b6".repeat(32);
+        let follow = |x: &str, y: &str, t: u64| {
+            Record::new(x, t, Body::Follow(Follow { followee: y.into(), active: true })).unwrap()
+        };
+        s.apply(&follow(&alice, &alice_friend, 1));
+        s.apply(&follow(&bob, &bob_friend, 1));
+
+        let from_alice = s.trust_graph(&[(alice.clone(), 1.0)], 0.85, 20);
+        assert!(from_alice.get(&alice_friend).copied().unwrap_or(0.0) > 0.0);
+        assert!(from_alice.get(&bob_friend).copied().unwrap_or(0.0) < 1e-9);
+
+        let from_bob = s.trust_graph(&[(bob.clone(), 1.0)], 0.85, 20);
+        assert!(from_bob.get(&bob_friend).copied().unwrap_or(0.0) > 0.0);
+        assert!(from_bob.get(&alice_friend).copied().unwrap_or(0.0) < 1e-9);
+    }
+
+    #[test]
     fn profile_last_write_wins() {
         let mut s = State::new();
         let a = "aa".repeat(32);

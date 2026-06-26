@@ -70,6 +70,10 @@ impl TranaService {
                 Ok(r) => env(self.engine.device_link(from, r).await),
                 Err(e) => Envelope::err(e),
             },
+            proto::T_TRUST_GRAPH => match parse::<proto::PersonalTrustReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.personal_trust(r)),
+                Err(e) => Envelope::err(e),
+            },
             proto::T_KARMA => match parse::<proto::KarmaReq>(p) {
                 Ok(r) => env(self.engine.karma(&r.node_id).await),
                 Err(e) => Envelope::err(e),
@@ -101,7 +105,7 @@ impl TranaService {
                 Err(e) => Envelope::err(e),
             },
             proto::T_BANSTANDING => match parse::<proto::BanStandingReq>(p) {
-                Ok(r) => Envelope::ok(&self.engine.ban_standing(&r.board, &r.target)),
+                Ok(r) => Envelope::ok(&self.engine.ban_standing(&r.board, &r.target).await),
                 Err(e) => Envelope::err(e),
             },
             proto::T_POLICY_PROPOSE => self.write_reply(parse(p).map(|r| self.engine.policy_propose(from, r))).await,

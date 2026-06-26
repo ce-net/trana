@@ -61,4 +61,31 @@ impl ComputeProbe {
         }
         trust
     }
+
+    /// Web-of-trust seed candidates drawn from CE's compute reputation: nodes that have actually
+    /// **delivered** paid work (jobs + heartbeats) — the hard-to-fake, economically-costly signal —
+    /// each weighted by `ln(1 + delivered)` (capped). Bounded to the top `max` atlas advertisers so
+    /// at most `max` `/history` lookups happen. Nodes that only *advertise* capacity but have
+    /// delivered nothing are NOT seeded, so merely claiming cores buys no trust. With device binding
+    /// (P0a) a profile cannot borrow these nodes' reputation either, so this is a sound anchor.
+    pub async fn seed_nodes(&self, max: usize) -> Vec<(String, f64)> {
+        let mut atlas = self.ce.atlas().await.unwrap_or_default();
+        if atlas.is_empty() {
+            return Vec::new();
+        }
+        // Prefer the largest advertisers, then confirm with delivered work.
+        atlas.sort_by(|a, b| b.cpu_cores.cmp(&a.cpu_cores));
+        atlas.truncate(max);
+        let mut seeds = Vec::new();
+        for e in atlas {
+            if let Ok(h) = self.ce.history(&e.node_id).await {
+                let delivered = h.jobs_hosted + h.heartbeats_hosted;
+                if delivered > 0 {
+                    let w = (delivered as f64).ln_1p().min(3.0);
+                    seeds.push((e.node_id, w));
+                }
+            }
+        }
+        seeds
+    }
 }

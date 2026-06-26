@@ -56,6 +56,15 @@ enum Cmd {
     Profile { node_id: Option<String> },
     /// Show karma + compute trust for a node (defaults to the local node).
     Karma { node_id: Option<String> },
+    /// Personalized web-of-trust ranks from a viewer's perspective (defaults to the local node).
+    Trust {
+        #[arg(long)]
+        viewer: Option<String>,
+        /// Specific nodes to score; omit to list the viewer's top-ranked nodes.
+        nodes: Vec<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Create a thread root in a board.
     Post {
         #[arg(long)]
@@ -286,6 +295,10 @@ async fn main() -> Result<()> {
         Cmd::Profile { node_id } => {
             let id = node_id.unwrap_or(local_id);
             print_json(&t.profile_get(&id).await?)?;
+        }
+        Cmd::Trust { viewer, nodes, limit } => {
+            let v = viewer.unwrap_or(local_id);
+            print_json(&t.personal_trust(&v, nodes, limit).await?)?;
         }
         Cmd::Karma { node_id } => {
             let id = node_id.unwrap_or(local_id);

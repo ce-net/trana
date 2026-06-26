@@ -175,20 +175,28 @@ edges by age (reuse Feature 1's `decay`), keep the compute seed weighted heavily
 | **P0b** | DONE | Vote timestamps + reverse index | `target_votes`, `apply_vote`, tests |
 | **P1** | DONE | Decay: `decay`, `Weights.half_life_secs`, `now_ms` plumbed | core + engine |
 | **P2** | DONE | `weighted_score` + `social_weighted` effective karma | core + engine |
-| **P3** | DONE | Web-of-trust: `trust_graph`, node recompute+cache, 3rd `TrustScore` term, seeded by roots + board creators; vote/ban weight = graph rank | core + engine |
-| **P5** | TODO | Personalized PPR `trust/graph?from=` query for feed personalization | engine + proto + SDK |
+| **P3** | DONE | Web-of-trust: `trust_graph`, node recompute+cache, 3rd `TrustScore` term, seeded by roots + board creators + **compute-trust nodes**; vote/ban weight = graph rank | core + engine |
+| **P5** | DONE | Personalized PPR `trana/trust/graph/v1` query restarting to the viewer | `Engine::personal_trust` + proto + SDK `personal_trust` + CLI `trust` |
 
 ## Operational notes
 
 - Set `TRANA_TRUST_ROOTS` (comma-separated node ids) on each node to a shared anchor set so global
   ranks converge and sybil resistance is real; with no roots the graph falls back to a uniform
   restart over board creators (weaker, still useful for ranking).
-- Seeds today are **board creators + configured roots**, not compute-trust nodes. With P0a done
-  (mutual device binding), self-declared `Profile.devices` can no longer forge a device's compute, so
-  compute-trust is now safe to add as an additional seed — the remaining follow-up to `rank_snapshot`.
-- Decay uses each node's wall-clock `now_ms`, so two nodes' *trust scores* can differ by seconds of
-  decay. The convergent content-hiding decision still uses the raw `banned_raw` tally, so this drift
-  never causes nodes to disagree on what is hidden.
+- Global-rank seeds are **configured roots (w 2.0) + board creators (w 1.0) + CE compute-trust nodes
+  (w `ln(1+delivered)`)**. The compute seed (`ComputeProbe::seed_nodes`) only counts nodes that have
+  *delivered* paid work — advertised-only capacity buys nothing — and is bounded to the top 32 atlas
+  advertisers to cap `/history` lookups. P0a (mutual device binding) makes this sound: a profile
+  cannot borrow a delivering node's reputation.
+- The rank cache is keyed on `store.len()`, so compute-seed refresh is coupled to new trana content
+  arriving, not to CE compute state changing on its own — a compute node's rank updates on the next
+  trana write, which is acceptable for a slowly-varying anchor.
+- Decay uses each node's wall-clock `now_ms`, and compute seeds depend on per-node CE state, so two
+  nodes' *trust scores* can differ slightly. The convergent content-hiding decision still uses the
+  raw `banned_raw` tally, so this drift never causes nodes to disagree on what is hidden.
+- **P5 is viewer-relative on purpose.** `personal_trust` restarts the PageRank to the *viewer*, so it
+  reflects one person's vantage and must NOT be used for gates/bans (those use the global rank). It is
+  for ranking a personalized feed by "how much do I trust this author?".
 
 Convergence, idempotence and the existing 24 unit tests must stay green at every phase; add
 fold tests for decayed scores, weighted tallies, and a sybil-ring scenario (ring gets near-zero

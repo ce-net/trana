@@ -33,6 +33,7 @@ pub const T_COMMENTS: &str = "trana/comments/v1";
 pub const T_VOTE: &str = "trana/vote/v1";
 pub const T_FOLLOW: &str = "trana/follow/v1";
 pub const T_DEVICE_LINK: &str = "trana/device/link/v1";
+pub const T_TRUST_GRAPH: &str = "trana/trust/graph/v1";
 pub const T_KARMA: &str = "trana/karma/v1";
 pub const T_STREAM_START: &str = "trana/stream/start/v1";
 pub const T_STREAM_APPEND: &str = "trana/stream/append/v1";
@@ -76,6 +77,7 @@ pub const RPC_TOPICS: &[&str] = &[
     T_VOTE,
     T_FOLLOW,
     T_DEVICE_LINK,
+    T_TRUST_GRAPH,
     T_KARMA,
     T_STREAM_START,
     T_STREAM_APPEND,
@@ -319,6 +321,27 @@ pub struct KarmaResp {
     pub social: SocialKarma,
     pub compute: ComputeTrust,
     pub trust: TrustScore,
+}
+
+// ----- personalized web-of-trust (feed personalization) -----
+
+/// "How much do I trust these nodes?" from `viewer`'s own perspective — a personalized PageRank that
+/// restarts to the viewer, so trust flows out through who they follow. Unlike the global trust used
+/// for gates/bans, this is viewer-relative and meant for ranking a personalized feed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalTrustReq {
+    pub viewer: String,
+    /// Nodes to score. Empty = return the viewer's top-ranked nodes (up to `limit`).
+    #[serde(default)]
+    pub nodes: Vec<String>,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalTrustResp {
+    /// `(node_id, personalized_rank)` in 0.0–1.0, highest first.
+    pub ranks: Vec<(String, f64)>,
 }
 
 // ----- streams -----

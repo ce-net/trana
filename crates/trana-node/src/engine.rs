@@ -65,9 +65,11 @@ impl Engine {
     }
 
     /// The current web-of-trust ranks, recomputing if the store grew since the cache was built.
-    /// Seeds = configured roots (weight 2.0) plus every board creator (weight 1.0). Deterministic in
-    /// the folded log + roots, so nodes sharing the same roots converge on the same ranks.
-    fn rank_snapshot(&self) -> HashMap<String, f64> {
+    /// Seeds = configured roots (weight 2.0) + every board creator (weight 1.0) + CE compute-trust
+    /// nodes that have delivered real work (weight `ln(1+delivered)`, the hard-to-fake anchor — see
+    /// [`ComputeProbe::seed_nodes`]). Recompute is gated on `store.len()` growth, so the bounded CE
+    /// lookups happen only when new content arrives, not on every read.
+    async fn rank_snapshot(&self) -> HashMap<String, f64> {
         let len = self.store.len();
         {
             let g = self.rank.read().unwrap();
@@ -78,6 +80,10 @@ impl Engine {
         let mut seeds: Vec<(String, f64)> = self.roots.iter().map(|r| (r.clone(), 2.0)).collect();
         for c in self.store.board_creators() {
             seeds.push((c, 1.0));
+        }
+        // Compute-trust anchor (P0a makes the device→owner roll-up unforgeable, so this is sound).
+        for (n, w) in self.compute.seed_nodes(32).await {
+            seeds.push((n, w));
         }
         let map = self.store.trust_graph(&seeds, 0.85, 20);
         let mut g = self.rank.write().unwrap();
@@ -181,7 +187,7 @@ impl Engine {
     /// A user's fused trust (0.0–1.0): trust-weighted social karma + on-chain compute reputation
     /// across their devices + web-of-trust rank.
     async fn trust_of(&self, node_id: &str) -> f64 {
-        let rank = self.rank_snapshot();
+        let rank = self.rank_snapshot().await;
         let social = self.weighted_social(node_id, &rank);
         let devices = self.device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
@@ -220,7 +226,7 @@ impl Engine {
     /// fused score (with the web-of-trust term).
     pub async fn profile_get(&self, node_id: &str) -> Result<ProfileResp> {
         let profile = self.store.profile(node_id);
-        let rank = self.rank_snapshot();
+        let rank = self.rank_snapshot().await;
         let social = self.weighted_social(node_id, &rank);
         let devices = self.device_set(node_id, profile.as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
@@ -326,10 +332,25 @@ impl Engine {
         Ok(OkResp { ok: true })
     }
 
+    /// Personalized web-of-trust: how much `viewer` trusts each requested node (or their top-ranked
+    /// nodes), from the viewer's own vantage point — a PageRank restarting to the viewer. This is
+    /// viewer-relative and for feed personalization; it does NOT touch the global gate/ban ranks.
+    pub fn personal_trust(&self, req: PersonalTrustReq) -> PersonalTrustResp {
+        let ranks = self.store.trust_graph(&[(req.viewer.clone(), 1.0)], 0.85, 20);
+        let mut v: Vec<(String, f64)> = if req.nodes.is_empty() {
+            ranks.into_iter().filter(|(n, _)| n != &req.viewer).collect()
+        } else {
+            req.nodes.iter().map(|n| (n.clone(), ranks.get(n).copied().unwrap_or(0.0))).collect()
+        };
+        v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        v.truncate(req.limit.min(500));
+        PersonalTrustResp { ranks: v }
+    }
+
     // ----- karma -----
 
     pub async fn karma(&self, node_id: &str) -> Result<KarmaResp> {
-        let rank = self.rank_snapshot();
+        let rank = self.rank_snapshot().await;
         let social = self.weighted_social(node_id, &rank);
         let devices = self.device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
@@ -436,10 +457,10 @@ impl Engine {
 
     /// A user's community ban standing: the raw one-person-one-vote tally plus the node's
     /// trust-weighted ("respect"-weighted) verdict.
-    pub fn ban_standing(&self, board: &str, target: &str) -> BanStandingResp {
+    pub async fn ban_standing(&self, board: &str, target: &str) -> BanStandingResp {
         let standing = self.store.ban_standing(board, target);
         let policy = self.store.board_policy(board);
-        let rank = self.rank_snapshot();
+        let rank = self.rank_snapshot().await;
         let mut w_support = 0.0;
         let mut w_total = 0.0;
         for (voter, support) in self.store.ban_votes_raw(board, target) {
