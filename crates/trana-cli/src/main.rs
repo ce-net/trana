@@ -22,6 +22,15 @@ struct Cli {
     #[arg(long)]
     node: Option<String>,
 
+    /// Act as another identity (its NodeId) via a ce-cap capability. Requires --cap.
+    #[arg(long = "as")]
+    as_author: Option<String>,
+
+    /// The ce-cap capability token authorizing this device to act as --as
+    /// (mint with `ce grant <this-node> --can trana:act`).
+    #[arg(long)]
+    cap: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -243,10 +252,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let ce = ce_rs::CeClient::new(cli.node_url);
     let local_id = ce.status().await.context("local CE node not reachable")?.node_id;
-    let t = match &cli.node {
+    let mut t = match &cli.node {
         Some(n) => TranaClient::pinned(ce, n.clone()),
         None => TranaClient::new(ce),
     };
+    if let (Some(a), Some(c)) = (&cli.as_author, &cli.cap) {
+        t = t.with_act_as(a.clone(), c.clone());
+    }
 
     match cli.cmd {
         Cmd::ProfileSet { display_name, bio, handle, devices, avatar } => {

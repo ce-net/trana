@@ -43,6 +43,9 @@ pub struct TranaClient {
     timeout_ms: u64,
     /// If set, always call this specific trana node instead of locating one.
     pinned: Option<String>,
+    /// Delegated identity: `(claimed_author, capability_token)`. When set, every write is attributed
+    /// to `claimed_author` and carries the ce-cap capability proving this device may act as them.
+    act_as: Option<(String, String)>,
 }
 
 impl TranaClient {
@@ -53,18 +56,26 @@ impl TranaClient {
 
     /// Client against a given [`CeClient`].
     pub fn new(ce: CeClient) -> Self {
-        TranaClient { ce, timeout_ms: TIMEOUT_MS, pinned: None }
+        TranaClient { ce, timeout_ms: TIMEOUT_MS, pinned: None, act_as: None }
     }
 
     /// Pin every call to one specific trana node id (skip discovery). Useful for tests and for
     /// talking to your own co-located node.
     pub fn pinned(ce: CeClient, node_id: impl Into<String>) -> Self {
-        TranaClient { ce, timeout_ms: TIMEOUT_MS, pinned: Some(node_id.into()) }
+        TranaClient { ce, timeout_ms: TIMEOUT_MS, pinned: Some(node_id.into()), act_as: None }
     }
 
     /// Override the per-call timeout.
     pub fn with_timeout(mut self, ms: u64) -> Self {
         self.timeout_ms = ms;
+        self
+    }
+
+    /// Act as another identity via a ce-cap capability: every write is attributed to `author` and
+    /// carries `cap_token` (a `ce grant <this-device> --can trana:act` token signed by `author`). The
+    /// serving node verifies the delegation and rejects a forged one.
+    pub fn with_act_as(mut self, author: impl Into<String>, cap_token: impl Into<String>) -> Self {
+        self.act_as = Some((author.into(), cap_token.into()));
         self
     }
 
@@ -86,7 +97,18 @@ impl TranaClient {
         topic: &str,
         req: &Q,
     ) -> Result<R> {
-        let payload = serde_json::to_vec(req)?;
+        // When acting as a delegated identity, merge `_as`/`_cap` into the (object) request body.
+        let payload = match &self.act_as {
+            Some((author, cap)) => {
+                let mut v = serde_json::to_value(req)?;
+                if let serde_json::Value::Object(m) = &mut v {
+                    m.insert("_as".into(), serde_json::Value::String(author.clone()));
+                    m.insert("_cap".into(), serde_json::Value::String(cap.clone()));
+                }
+                serde_json::to_vec(&v)?
+            }
+            None => serde_json::to_vec(req)?,
+        };
         let reply = match &self.pinned {
             Some(node) => self.ce.request(node, topic, &payload, self.timeout_ms).await?,
             None => {

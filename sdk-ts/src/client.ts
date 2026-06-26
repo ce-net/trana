@@ -16,6 +16,9 @@ export interface ClientOptions {
   fetch?: typeof fetch;
   /** How long a discovered instance list is reused before re-discovery, ms (default 15000). */
   discoveryTtlMs?: number;
+  /** Act as another identity via a ce-cap capability: writes are attributed to `author` and carry
+   *  `cap` (a `ce grant <this-device> --can trana:act` token signed by `author`). */
+  actAs?: { author: string; cap: string };
 }
 
 const SERVICE = "trana";
@@ -62,6 +65,7 @@ export class TranaClient {
   private instances: string[] = [];
   private discoveredAt = 0;
   private cursor = 0; // round-robin start, so load spreads across instances.
+  private actAs?: { author: string; cap: string };
 
   constructor(opts: ClientOptions = {}) {
     this.node = (opts.node ?? "http://127.0.0.1:8844").replace(/\/+$/, "");
@@ -69,6 +73,7 @@ export class TranaClient {
     this.timeoutMs = opts.timeoutMs ?? 10000;
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.discoveryTtlMs = opts.discoveryTtlMs ?? 15000;
+    this.actAs = opts.actAs;
   }
 
   private headers(json: boolean): Record<string, string> {
@@ -119,7 +124,12 @@ export class TranaClient {
 
   /** Send a typed mesh RPC to trana with failover across instances; returns the decoded `T`. */
   async call<T>(topic: string, req: unknown): Promise<T> {
-    const payloadHex = toHex(new TextEncoder().encode(JSON.stringify(req)));
+    // When acting as a delegated identity, merge _as/_cap into the (object) request body.
+    const body =
+      this.actAs && req && typeof req === "object" && !Array.isArray(req)
+        ? { ...(req as Record<string, unknown>), _as: this.actAs.author, _cap: this.actAs.cap }
+        : req;
+    const payloadHex = toHex(new TextEncoder().encode(JSON.stringify(body)));
     const instances = await this.instancesNow();
     if (instances.length === 0) throw new TranaError("no trana instance reachable via the CE node");
 
