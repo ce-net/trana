@@ -554,6 +554,123 @@ impl State {
         v
     }
 
+    // ----- community governance queries -----
+
+    /// A board's namespace metadata + community params (defaults if never explicitly created).
+    pub fn board(&self, board: &str) -> BoardView {
+        let b = self.boards.get(board);
+        BoardView {
+            board: board.to_string(),
+            title: b.map(|x| x.title.clone()).unwrap_or_default(),
+            description: b.map(|x| x.description.clone()).unwrap_or_default(),
+            policy: self.policy_of(board),
+            created_ms: b.map(|x| x.created_ms).unwrap_or(0),
+        }
+    }
+
+    /// Every explicitly-created board, newest first.
+    pub fn boards(&self) -> Vec<BoardView> {
+        let mut v: Vec<BoardView> = self.boards.keys().map(|k| self.board(k)).collect();
+        v.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+        v
+    }
+
+    /// The community params for a board (public accessor).
+    pub fn board_policy(&self, board: &str) -> BoardPolicy {
+        self.policy_of(board)
+    }
+
+    /// The raw (unweighted) community ban standing for a user in a board.
+    pub fn ban_standing(&self, board: &str, target: &str) -> BanStanding {
+        let mut support = 0u64;
+        let mut oppose = 0u64;
+        if let Some(votes) = self.ban_votes.get(&(board.to_string(), target.to_string())) {
+            for &s in votes.values() {
+                if s {
+                    support += 1;
+                } else {
+                    oppose += 1;
+                }
+            }
+        }
+        BanStanding {
+            board: board.to_string(),
+            target: target.to_string(),
+            support,
+            oppose,
+            banned_raw: self.is_banned_raw(board, target),
+        }
+    }
+
+    /// Is a user community-banned in a board by the raw (one-person-one-vote) tally? A ban needs at
+    /// least `ban_quorum` distinct voters and a `ban_support` fraction in favor. The node refines
+    /// this with trust weighting; this is the convergent default every node agrees on.
+    pub fn is_banned_raw(&self, board: &str, target: &str) -> bool {
+        let votes = match self.ban_votes.get(&(board.to_string(), target.to_string())) {
+            Some(v) => v,
+            None => return false,
+        };
+        let support = votes.values().filter(|&&s| s).count() as u64;
+        let total = votes.len() as u64;
+        if total == 0 {
+            return false;
+        }
+        let policy = self.policy_of(board);
+        total >= policy.ban_quorum as u64
+            && (support as f64) >= policy.ban_support * (total as f64)
+            && support * 2 > total
+    }
+
+    /// Raw per-voter ban votes for a user in a board: `(voter, support)` — for the node to apply
+    /// trust weighting.
+    pub fn ban_votes_raw(&self, board: &str, target: &str) -> Vec<(String, bool)> {
+        self.ban_votes
+            .get(&(board.to_string(), target.to_string()))
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
+            .unwrap_or_default()
+    }
+
+    /// A policy proposal with its current vote standing.
+    pub fn proposal(&self, id: &str) -> Option<ProposalView> {
+        let (author, ms, p) = self.proposals.get(id)?;
+        let (favor, against) = self.policy_tally(id);
+        Some(ProposalView {
+            id: id.to_string(),
+            author: author.clone(),
+            created_ms: *ms,
+            board: p.board.clone(),
+            title: p.title.clone(),
+            body: p.body.clone(),
+            favor,
+            against,
+        })
+    }
+
+    /// All policy proposals (optionally scoped to a board), newest first.
+    pub fn proposals(&self, board: Option<&str>) -> Vec<ProposalView> {
+        let mut v: Vec<ProposalView> = self
+            .proposals
+            .iter()
+            .filter(|(_, (_, _, p))| match board {
+                Some(b) => p.board.as_deref() == Some(b),
+                None => true,
+            })
+            .filter_map(|(id, _)| self.proposal(id))
+            .collect();
+        v.sort_by(|a, b| b.created_ms.cmp(&a.created_ms));
+        v
+    }
+
+    fn policy_tally(&self, proposal: &str) -> (u64, u64) {
+        match self.policy_votes.get(proposal) {
+            Some(m) => {
+                let favor = m.values().filter(|&&s| s).count() as u64;
+                (favor, m.len() as u64 - favor)
+            }
+            None => (0, 0),
+        }
+    }
+
     /// The social-karma aggregate for a user — the substrate [`crate::karma`] turns into a score.
     pub fn social(&self, node_id: &str) -> crate::karma::SocialKarma {
         let mut k = crate::karma::SocialKarma::default();
@@ -578,26 +695,93 @@ impl State {
     }
 }
 
-/// Order a slice of post views in place by `sort`.
-fn sort_views(views: &mut [PostView], sort: SortBy, now_ms: u64) {
-    match sort {
-        SortBy::New => views.sort_by(|a, b| b.created_ms.cmp(&a.created_ms)),
-        SortBy::Top => views.sort_by(|a, b| b.score.cmp(&a.score).then(b.created_ms.cmp(&a.created_ms))),
-        SortBy::Hot => views.sort_by(|a, b| {
-            hotness(b, now_ms)
-                .partial_cmp(&hotness(a, now_ms))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }),
+/// Default visibility grace window (seconds) for cross-board / home feeds (boards can override).
+fn default_grace() -> u64 {
+    6 * 3600
+}
+
+/// Rank a slice of post views in place by the feed algorithm `sort`. `grace` is the board's
+/// visibility window in seconds (only [`SortBy::Hot`], the default community feed, uses it).
+fn rank_views(views: &mut [PostView], sort: SortBy, now_ms: u64, grace: u64) {
+    let key = |v: &PostView| -> f64 {
+        match sort {
+            SortBy::New => v.created_ms as f64,
+            SortBy::Top => v.score as f64,
+            SortBy::Hot => chance_hot(v, now_ms, grace),
+            SortBy::Best => wilson_lower_bound(v.ups, v.downs),
+            SortBy::Trending => trending(v, now_ms),
+            SortBy::Rising => rising(v, now_ms),
+            SortBy::Controversial => controversial(v),
+        }
+    };
+    views.sort_by(|a, b| {
+        key(b)
+            .partial_cmp(&key(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.created_ms.cmp(&a.created_ms))
+    });
+}
+
+fn age_hours(v: &PostView, now_ms: u64) -> f64 {
+    now_ms.saturating_sub(v.created_ms) as f64 / 3_600_000.0
+}
+
+/// The community feed score — trana's deliberate inversion of Reddit. **During the grace window** a
+/// post is ranked by ENGAGEMENT magnitude (ups + downs, sign-agnostic) plus a decaying visibility
+/// boost: controversy and dissent get *seen*, never buried, so a post has a real chance to persuade
+/// people or find the ones who already agree. **After** the window, net reception takes over — so
+/// sustained approval persists and sustained "booing" fades (and is what motivates a community ban).
+fn chance_hot(v: &PostView, now_ms: u64, grace_secs: u64) -> f64 {
+    const GRACE_BOOST: f64 = 3.0;
+    let age_secs = now_ms.saturating_sub(v.created_ms) / 1000;
+    let engagement = (v.ups + v.downs) as f64;
+    let base = (engagement + 1.0).log10(); // sign-agnostic: a fight ranks like a love-in
+    let recency = -age_hours(v, now_ms) / 12.0;
+
+    if grace_secs > 0 && age_secs <= grace_secs {
+        // Inside the window: decaying boost, no net-score penalty — everyone gets a chance.
+        let grace_frac = 1.0 - (age_secs as f64 / grace_secs as f64);
+        base + grace_frac * GRACE_BOOST + recency
+    } else {
+        // Out of the window: reception decides (sign-aware log score).
+        let s = v.score;
+        let sign = if s > 0 { 1.0 } else if s < 0 { -1.0 } else { 0.0 };
+        let reception = sign * ((s.unsigned_abs()) as f64 + 1.0).log10();
+        base * 0.25 + reception + recency
     }
 }
 
-/// A simple Reddit-like hotness: sign-aware log score minus an age penalty (~12h half-life scale).
-fn hotness(v: &PostView, now_ms: u64) -> f64 {
-    let s = v.score;
-    let order = ((s.unsigned_abs().max(1)) as f64).log10();
-    let sign = if s > 0 { 1.0 } else if s < 0 { -1.0 } else { 0.0 };
-    let age_hours = (now_ms.saturating_sub(v.created_ms)) as f64 / 3_600_000.0;
-    sign * order - age_hours / 12.0
+/// Wilson score lower bound (95%) — "best": how confidently a post is liked, robust to sample size.
+fn wilson_lower_bound(ups: u64, downs: u64) -> f64 {
+    let n = (ups + downs) as f64;
+    if n == 0.0 {
+        return 0.0;
+    }
+    let z = 1.959_963_984_540_054_f64;
+    let phat = ups as f64 / n;
+    (phat + z * z / (2.0 * n) - z * ((phat * (1.0 - phat) + z * z / (4.0 * n)) / n).sqrt())
+        / (1.0 + z * z / n)
+}
+
+/// Velocity: total engagement decayed steeply by age — what is blowing up right now (sign-agnostic).
+fn trending(v: &PostView, now_ms: u64) -> f64 {
+    let engagement = (v.ups + v.downs) as f64;
+    engagement / (age_hours(v, now_ms) + 2.0).powf(1.5)
+}
+
+/// Young posts gaining traction fast: positive score + replies per (early) hour.
+fn rising(v: &PostView, now_ms: u64) -> f64 {
+    let momentum = v.score.max(0) as f64 + v.reply_count as f64;
+    momentum / (age_hours(v, now_ms) + 2.0)
+}
+
+/// High engagement that is split — the fights. Zero unless there are both up and down votes.
+fn controversial(v: &PostView) -> f64 {
+    if v.ups == 0 || v.downs == 0 {
+        return 0.0;
+    }
+    let (lo, hi) = if v.ups <= v.downs { (v.ups, v.downs) } else { (v.downs, v.ups) };
+    (v.ups + v.downs) as f64 * (lo as f64 / hi as f64)
 }
 
 #[cfg(test)]
