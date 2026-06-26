@@ -8,8 +8,8 @@
 //! the backend genuinely distributed rather than a single source of truth.
 
 use crate::model::{
-    BanVote, BoardCreate, BoardPolicy, Body, Document, Media, PolicyProposal, PolicyVote, Post,
-    Profile, Ref, StreamSegment, StreamStart,
+    BanVote, BoardCreate, BoardPolicy, Body, Document, FileRef, Media, PolicyProposal, PolicyVote,
+    Post, Profile, Ref, StreamSegment, StreamStart,
 };
 use crate::record::Record;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -130,15 +130,36 @@ pub struct DocumentView {
     pub created_ms: u64,
     pub title: String,
     pub body: String,
+    /// Present when this document version is a binary file (PDF/dataset/...).
+    pub file: Option<FileRef>,
     pub board: Option<String>,
     /// All references this document makes (declared `refs` + any parsed from the markdown body), as
     /// `trana://...` URIs — the clean, mesh-resolvable content addresses.
     pub refs: Vec<String>,
     /// `trana://...` URIs of content that references THIS document (backlinks).
     pub referenced_by: Vec<String>,
+    // ----- version control -----
+    /// Stable series id (the first version's record id) — the artifact's identity across edits.
+    pub series: String,
+    /// The version this one supersedes, if any.
+    pub prev: Option<String>,
+    /// 1-based version number within the series.
+    pub version: u32,
+    /// Total versions in the series.
+    pub versions: u32,
+    /// True if this is the newest version in its series.
+    pub is_latest: bool,
     pub ups: u64,
     pub downs: u64,
     pub score: i64,
+}
+
+/// One line of a unified diff between two document versions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiffLine {
+    /// `" "` context, `"-"` removed, `"+"` added.
+    pub op: String,
+    pub text: String,
 }
 
 /// A board namespace view.
@@ -205,6 +226,8 @@ pub struct State {
 
     /// document id -> (author, created_ms, document).
     documents: HashMap<String, (String, u64, Document)>,
+    /// series id -> version record ids (a document's edit history; git-like version chain).
+    doc_series: HashMap<String, Vec<String>>,
     /// referenced content id -> the `trana://...` URIs that reference it (backlinks).
     backlinks: HashMap<String, Vec<String>>,
 
@@ -360,7 +383,29 @@ impl State {
                 entry.push(self_uri.clone());
             }
         }
+        // Index the version into its series (the first version's id, or this id if it starts one).
+        let series = d.series.clone().unwrap_or_else(|| id.to_string());
+        let chain = self.doc_series.entry(series).or_default();
+        if !chain.contains(&id.to_string()) {
+            chain.push(id.to_string());
+        }
         self.documents.insert(id.to_string(), (author.to_string(), created_ms, d.clone()));
+    }
+
+    /// The series id a document version belongs to.
+    fn series_of(&self, id: &str) -> String {
+        match self.documents.get(id) {
+            Some((_, _, d)) => d.series.clone().unwrap_or_else(|| id.to_string()),
+            None => id.to_string(),
+        }
+    }
+
+    /// Version ids of a series (or the series containing `key`), ordered oldest -> newest by time.
+    fn series_versions(&self, key: &str) -> Vec<String> {
+        let series = self.series_of(key);
+        let mut ids = self.doc_series.get(&series).cloned().unwrap_or_default();
+        ids.sort_by_key(|id| self.documents.get(id).map(|(_, t, _)| *t).unwrap_or(0));
+        ids
     }
 
     /// All references a document makes: its declared `refs` plus any parsed inline from the markdown,
@@ -446,23 +491,60 @@ impl State {
         v.into_iter().map(|(id, _, m)| (id, m)).collect()
     }
 
-    /// A document by id, with its forward refs, backlinks, and vote tally.
+    /// A document version by id, with its refs, backlinks, vote tally, and version-control position.
     pub fn document(&self, id: &str) -> Option<DocumentView> {
         let (author, created_ms, d) = self.documents.get(id)?;
         let (ups, downs) = self.tally.get(id).copied().unwrap_or((0, 0));
+        let chain = self.series_versions(id);
+        let version = chain.iter().position(|v| v == id).map(|i| i as u32 + 1).unwrap_or(1);
         Some(DocumentView {
             id: id.to_string(),
             author: author.clone(),
             created_ms: *created_ms,
             title: d.title.clone(),
             body: d.body.clone(),
+            file: d.file.clone(),
             board: d.board.clone(),
             refs: self.doc_all_refs(d).iter().map(|r| r.to_uri()).collect(),
             referenced_by: self.backlinks.get(id).cloned().unwrap_or_default(),
+            series: self.series_of(id),
+            prev: d.prev.clone(),
+            version,
+            versions: chain.len() as u32,
+            is_latest: chain.last().map(|v| v == id).unwrap_or(true),
             ups,
             downs,
             score: ups as i64 - downs as i64,
         })
+    }
+
+    /// The full version history of a document (or the series containing `key`), oldest -> newest.
+    pub fn document_history(&self, key: &str) -> Vec<DocumentView> {
+        self.series_versions(key).iter().filter_map(|id| self.document(id)).collect()
+    }
+
+    /// The newest version of a document's series.
+    pub fn document_latest(&self, key: &str) -> Option<DocumentView> {
+        self.series_versions(key).last().and_then(|id| self.document(id))
+    }
+
+    /// A unified line diff between two document versions' markdown bodies. For binary-file versions
+    /// (no text body) it returns a single line summarizing the change.
+    pub fn document_diff(&self, from_id: &str, to_id: &str) -> Vec<DiffLine> {
+        let from = self.documents.get(from_id).map(|(_, _, d)| d);
+        let to = self.documents.get(to_id).map(|(_, _, d)| d);
+        let (from, to) = match (from, to) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return Vec::new(),
+        };
+        if from.file.is_some() || to.file.is_some() {
+            let a = from.file.as_ref().map(|f| f.size).unwrap_or(0);
+            let b = to.file.as_ref().map(|f| f.size).unwrap_or(0);
+            let same = from.file.as_ref().map(|f| &f.object_cid) == to.file.as_ref().map(|f| &f.object_cid);
+            let msg = if same { "binary unchanged".into() } else { format!("binary changed ({a} -> {b} bytes)") };
+            return vec![DiffLine { op: " ".into(), text: msg }];
+        }
+        line_diff(&from.body, &to.body)
     }
 
     /// All documents authored by a user, newest first.
@@ -879,6 +961,45 @@ fn controversial(v: &PostView) -> f64 {
     }
     let (lo, hi) = if v.ups <= v.downs { (v.ups, v.downs) } else { (v.downs, v.ups) };
     (v.ups + v.downs) as f64 * (lo as f64 / hi as f64)
+}
+
+/// A unified line diff (LCS-based) between two texts — the diff-tracking under document versioning.
+fn line_diff(a: &str, b: &str) -> Vec<DiffLine> {
+    let al: Vec<&str> = a.lines().collect();
+    let bl: Vec<&str> = b.lines().collect();
+    let (n, m) = (al.len(), bl.len());
+    // LCS length table.
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if al[i] == bl[j] { dp[i + 1][j + 1] + 1 } else { dp[i + 1][j].max(dp[i][j + 1]) };
+        }
+    }
+    let mut out = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let line = |op: &str, t: &str| DiffLine { op: op.into(), text: t.into() };
+    while i < n && j < m {
+        if al[i] == bl[j] {
+            out.push(line(" ", al[i]));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            out.push(line("-", al[i]));
+            i += 1;
+        } else {
+            out.push(line("+", bl[j]));
+            j += 1;
+        }
+    }
+    while i < n {
+        out.push(line("-", al[i]));
+        i += 1;
+    }
+    while j < m {
+        out.push(line("+", bl[j]));
+        j += 1;
+    }
+    out
 }
 
 #[cfg(test)]
