@@ -1,0 +1,36 @@
+# trana-node — ce-appmgr package manifest.
+#
+# Deploys trana-node as a ce-appmgr-managed native daemon: ce resolves this manifest, fetches +
+# verifies the content-addressed binary, supervises it (restart on failure), and registers the live
+# instance. trana-node needs only loopback access to the local CE node's HTTP API (:8844) — it talks
+# to the mesh through the node, not directly — so the sandbox is loopback-scoped.
+#
+# Build + publish + install (local registry):
+#   cargo build --release -p trana-node                 # produce the artifact
+#   # upload the binary to the blob store, put its sha256 in [native].artifacts below
+#   ce app publish ./trana-node.ceapp.toml --out <registry-dir>
+#   ce app install trana-node --registry <registry-origin> --yes
+#   ce app daemon enable trana-node && ce app daemon run
+
+[app]
+name = "trana-node"
+version = "0.1.0"
+summary = "trana — distributed social/content + trust backend (mesh service)"
+runtime = "native"
+publisher = "c0be11e0ce0aaa769da6f9970244947d3d32a0c0d8302fb5f41f73d7950be456"
+
+[native]
+bin = "trana-node"
+# sha256 of the trana-node binary per host target (ce-appmgr picks by host_target()).
+artifacts."darwin-arm64" = "sha256:372c2688160414efdbec1dc0dc321a16e22ff003b4f98a439aa2e836fb6fee06"
+
+[sandbox]
+# Native host process (no runc/gvisor on macOS); explicit `none` is audited. trana-node reaches the
+# CE node on loopback :8844 and nothing else.
+tier = "none"
+net = "loopback"
+capability = "inherit"
+
+[daemon]
+enabled = false
+restart = "on-failure"
