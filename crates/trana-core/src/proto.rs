@@ -41,6 +41,12 @@ pub const T_STREAMS_LIVE: &str = "trana/streams/live/v1";
 /// Internal replication RPC: "please pull + pin this record/object".
 pub const T_REPLICATE: &str = "trana/replicate/v1";
 
+// ----- documents + content addressing -----
+pub const T_DOC_PUT: &str = "trana/document/put/v1";
+pub const T_DOC_GET: &str = "trana/document/get/v1";
+pub const T_DOCS_BY: &str = "trana/documents/by/v1";
+pub const T_BACKLINKS: &str = "trana/backlinks/v1";
+
 // ----- community governance -----
 pub const T_BOARD_PUT: &str = "trana/board/put/v1";
 pub const T_BOARD_GET: &str = "trana/board/get/v1";

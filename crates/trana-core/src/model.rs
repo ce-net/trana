@@ -380,20 +380,48 @@ pub fn extract_refs(markdown: &str) -> Vec<Ref> {
     out
 }
 
-/// A document: a standalone markdown artifact that can reference any other content (recursively —
-/// documents can reference documents). Addressed by its record id (`trana://document/<id>`), votable
-/// and karma-bearing like a post, but not part of a thread.
+/// A binary/file payload for a document version — a PDF, image, archive, dataset, anything. The bytes
+/// live in the CE object store (content-addressed); this names them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRef {
+    pub object_cid: String,
+    pub mime: String,
+    pub size: u64,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// A document: a **versioned** artifact — markdown *or* a binary file (PDF/dataset/...) — that can
+/// reference any other content (recursively). Addressed by its record id (`trana://document/<id>`),
+/// votable and karma-bearing.
+///
+/// Versioning is content-addressed and git-like: each edit is a new record whose `prev` points at the
+/// version it supersedes and whose `series` is the stable id of the first version. The chain of
+/// versions is a Merkle DAG — every version is immutable and verifiable, history can never be
+/// silently rewritten, and the latest is just the tip. (A mirror into an actual ce-hub git repo is
+/// the interop layer on top.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub title: String,
-    /// Markdown body. May embed `trana://...` references inline.
+    /// Markdown body (empty for a pure-file document). May embed `trana://...` references inline.
+    #[serde(default)]
     pub body: String,
+    /// A binary/file payload, when this document *is* a file (PDF, image, dataset, ...).
+    #[serde(default)]
+    pub file: Option<FileRef>,
     /// Explicit references this document declares (in addition to any inline in `body`).
     #[serde(default)]
     pub refs: Vec<Ref>,
     /// Optional board to surface the document in.
     #[serde(default)]
     pub board: Option<String>,
+    /// Stable series id (the first version's record id). `None` means this record *starts* a new
+    /// series and its own id becomes the series id.
+    #[serde(default)]
+    pub series: Option<String>,
+    /// The record id of the version this supersedes (`None` for the first version).
+    #[serde(default)]
+    pub prev: Option<String>,
 }
 
 // =============================== community governance ===============================
