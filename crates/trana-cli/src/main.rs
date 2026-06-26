@@ -136,6 +136,8 @@ enum Cmd {
     },
     /// List currently-live streams.
     StreamsLive,
+    /// Show a stream (live or ended) by id, with its segment playlist.
+    StreamGet { id: String },
 
     // ----- community governance -----
     /// Create/register a board (community namespace) and its params.
@@ -378,6 +380,9 @@ async fn main() -> Result<()> {
             };
             t.stream_end(StreamEndReq { stream, recording_cid }).await?;
             println!("ok");
+        }
+        Cmd::StreamGet { id } => {
+            print_json(&t.stream_get(&id).await?)?;
         }
         Cmd::StreamsLive => {
             print_json(&t.streams_live().await?)?;
