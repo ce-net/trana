@@ -30,14 +30,14 @@ pub enum Body {
     StreamSegment(StreamSegment),
     /// End a live stream, optionally publishing a full recording object.
     StreamEnd(StreamEnd),
-    /// Claim/configure a board. First claim of a name wins; its author is the board owner.
+    /// Register a board (a community namespace) and its community params. First claim sets it.
     BoardCreate(BoardCreate),
-    /// Owner grants or revokes a moderator on a board.
-    ModGrant(ModGrant),
-    /// A moderator/owner action on a board (remove, lock, pin, ban, ...).
-    ModAction(ModAction),
-    /// A user reports a post/comment/user for moderator attention.
-    Report(Report),
+    /// A community vote to ban (or keep) a user in a board. No mods — the community decides.
+    BanVote(BanVote),
+    /// Propose a community policy (the substrate future AI enforcement applies). Community-voted.
+    PolicyProposal(PolicyProposal),
+    /// Vote a policy proposal up or down.
+    PolicyVote(PolicyVote),
 }
 
 impl Body {
@@ -53,9 +53,9 @@ impl Body {
             Body::StreamSegment(_) => "stream_segment",
             Body::StreamEnd(_) => "stream_end",
             Body::BoardCreate(_) => "board_create",
-            Body::ModGrant(_) => "mod_grant",
-            Body::ModAction(_) => "mod_action",
-            Body::Report(_) => "report",
+            Body::BanVote(_) => "ban_vote",
+            Body::PolicyProposal(_) => "policy_proposal",
+            Body::PolicyVote(_) => "policy_vote",
         }
     }
 }
@@ -239,38 +239,64 @@ pub struct StreamEnd {
     pub recording_cid: Option<String>,
 }
 
-// =============================== governance / moderation ===============================
+// =============================== community governance ===============================
 //
-// trana's moderation is HYBRID and capability-shaped, with NO global admin:
-//   - a board is an owned object (first claim of a name wins; the author is the owner);
-//   - the owner delegates moderators via [`ModGrant`]; mods/owner act via [`ModAction`];
-//   - every action is a signed, content-addressed record, so any node verifies the authority
-//     chain and honors it by default — while still keeping a local policy override (node
-//     sovereignty) and trust-gating who may vote/post (sybil resistance).
+// trana has NO moderators. Governance is the community itself: trust-weighted up/down voting,
+// trust + respect, and — the deliberate inversion of Reddit — a *grace window* that gives new and
+// controversial content MORE visibility first (a chance to persuade, or to find the people who
+// already agree). Only SUSTAINED rejection, decided by a trust-weighted community `BanVote` that
+// meets quorum, removes a user from a community. Policies are proposed and voted forward by people
+// ([`PolicyProposal`]/[`PolicyVote`]); a future AI layer enforces the policies the community passed.
+// The trust-weighting and quorum math live in the node (it knows each voter's fused trust); the
+// read-model carries the raw votes + the community params so any node converges to the same view.
 
-/// Per-board policy knobs. Trust thresholds are checked at write time by the node (it knows the
-/// caller's fused trust); the read-model carries the policy so any node enforces the same rules.
+/// Per-board community parameters (not moderator powers — there are none). Carried in the read-model
+/// so every node applies the same rules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardPolicy {
-    /// Minimum fused trust (0.0–1.0) required to create a post/comment. 0 = open.
+    /// Visibility grace window for a new post, in seconds: while inside it the feed surfaces the post
+    /// by ENGAGEMENT and recency (downvotes count as engagement, so controversy gets *seen*), not by
+    /// net score. After it, reception decides. This is the "give it a chance" window.
+    #[serde(default = "default_grace_secs")]
+    pub grace_secs: u64,
+    /// Trust-weighted net support fraction (0.0–1.0 of participating trust) required to ban a user.
+    #[serde(default = "default_ban_support")]
+    pub ban_support: f64,
+    /// Minimum number of distinct ban-voters before a ban can take effect (anti-brigading quorum).
+    #[serde(default = "default_ban_quorum")]
+    pub ban_quorum: u32,
+    /// Minimum fused trust (0.0–1.0) to create a post/comment here. 0 = open. (Node-enforced.)
     #[serde(default)]
     pub min_trust_to_post: f64,
-    /// Minimum fused trust (0.0–1.0) required to up/down vote. 0 = open.
+    /// Minimum fused trust (0.0–1.0) to vote here. 0 = open. (Node-enforced; sybil resistance.)
     #[serde(default)]
     pub min_trust_to_vote: f64,
-    /// If true, only the owner and moderators may post (an announce-only board).
-    #[serde(default)]
-    pub restricted_posting: bool,
+}
+
+fn default_grace_secs() -> u64 {
+    6 * 3600
+}
+fn default_ban_support() -> f64 {
+    0.66
+}
+fn default_ban_quorum() -> u32 {
+    10
 }
 
 impl Default for BoardPolicy {
     fn default() -> Self {
-        BoardPolicy { min_trust_to_post: 0.0, min_trust_to_vote: 0.0, restricted_posting: false }
+        BoardPolicy {
+            grace_secs: default_grace_secs(),
+            ban_support: default_ban_support(),
+            ban_quorum: default_ban_quorum(),
+            min_trust_to_post: 0.0,
+            min_trust_to_vote: 0.0,
+        }
     }
 }
 
-/// Claim and/or (re)configure a board. The first claim of a board name wins and fixes the owner;
-/// later `BoardCreate`s from the **owner** update the title/description/policy (last-write-wins).
+/// Register a board (a community namespace) and its params. First claim of a name sets it; there is
+/// no owner with special powers — only the namespace + community parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardCreate {
     pub board: String,
@@ -282,56 +308,35 @@ pub struct BoardCreate {
     pub policy: BoardPolicy,
 }
 
-/// The owner grants or revokes a moderator on a board. Only honored when authored by the board owner.
+/// A community member's vote on whether a user should be banned from a board. `support = true` votes
+/// to ban, `false` votes to keep. The voter is the record author; one (latest) vote per voter+target.
+/// A ban takes effect only when trust-weighted support clears `BoardPolicy::ban_support` AND quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModGrant {
+pub struct BanVote {
     pub board: String,
-    /// The NodeId being made (or unmade) a moderator.
-    pub moderator: String,
-    /// `true` grant, `false` revoke.
-    pub active: bool,
-}
-
-/// What a moderator/owner does. Each is authorized iff the record author owns or mods the board.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum ModActionKind {
-    /// Hide a post/comment from listings (reversible).
-    RemovePost { post: String },
-    /// Un-hide a previously removed post/comment.
-    RestorePost { post: String },
-    /// Stop a thread accepting new comments.
-    LockThread { root: String },
-    /// Re-open a locked thread.
-    UnlockThread { root: String },
-    /// Pin a thread to the top of the board.
-    PinThread { root: String },
-    /// Unpin a thread.
-    UnpinThread { root: String },
-    /// Ban a user from the board until `until_ms` (0 = permanent). Their content is hidden and they
-    /// cannot post/comment/vote in the board.
-    BanUser { user: String, #[serde(default)] until_ms: u64 },
-    /// Lift a ban.
-    UnbanUser { user: String },
-}
-
-/// A moderator/owner action on a board.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModAction {
-    pub board: String,
-    pub kind: ModActionKind,
-    /// Free-text reason / mod note (shown in the mod log).
-    #[serde(default)]
-    pub reason: String,
-}
-
-/// A user-filed report against a post/comment (or a user) for moderator attention.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Report {
-    /// The board the report is filed in (mods of that board see it).
-    pub board: String,
-    /// The reported record id (a post/comment id) or NodeId (a user).
+    /// The NodeId the community is voting on.
     pub target: String,
+    /// `true` = ban, `false` = keep / lift.
+    pub support: bool,
     #[serde(default)]
     pub reason: String,
+}
+
+/// A community policy proposal — the substrate the future AI policy layer enforces. The proposal id
+/// is the record id. Scoped to a board, or global when `board` is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyProposal {
+    #[serde(default)]
+    pub board: Option<String>,
+    pub title: String,
+    /// The policy text (human-readable; an AI layer will later parse + enforce it).
+    pub body: String,
+}
+
+/// A vote on a [`PolicyProposal`] (by proposal record id). One latest vote per voter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyVote {
+    pub proposal: String,
+    /// `true` = in favor, `false` = against.
+    pub support: bool,
 }
