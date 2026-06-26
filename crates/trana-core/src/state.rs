@@ -7,7 +7,10 @@
 //! of records converge to the same views regardless of arrival order. That convergence is what makes
 //! the backend genuinely distributed rather than a single source of truth.
 
-use crate::model::{Body, Media, Post, Profile, StreamSegment, StreamStart};
+use crate::model::{
+    BanVote, BoardCreate, BoardPolicy, Body, Media, PolicyProposal, PolicyVote, Post, Profile,
+    StreamSegment, StreamStart,
+};
 use crate::record::Record;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -105,6 +108,56 @@ struct StreamRec {
     segments: BTreeMap<u64, StreamSegment>,
 }
 
+/// A board: a community namespace plus its params. No owner powers — `rank` is only used to make the
+/// first-claim deterministic under out-of-order gossip.
+#[derive(Debug, Clone)]
+struct BoardRec {
+    title: String,
+    description: String,
+    policy: BoardPolicy,
+    created_ms: u64,
+    /// The winning claim's (created_ms, record_id) — smallest wins, so ownership-of-the-name is
+    /// deterministic regardless of arrival order.
+    rank: (u64, String),
+}
+
+/// A board namespace view.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BoardView {
+    pub board: String,
+    pub title: String,
+    pub description: String,
+    pub policy: BoardPolicy,
+    pub created_ms: u64,
+}
+
+/// The community ban standing for a user in a board: who voted to ban vs keep, and whether the raw
+/// (unweighted) tally already meets quorum. The node refines this with trust weighting.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BanStanding {
+    pub board: String,
+    pub target: String,
+    /// Distinct voters supporting a ban.
+    pub support: u64,
+    /// Distinct voters opposing (voting to keep).
+    pub oppose: u64,
+    /// True if the unweighted tally clears the board's support fraction AND quorum.
+    pub banned_raw: bool,
+}
+
+/// A community policy proposal with its current vote standing.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProposalView {
+    pub id: String,
+    pub author: String,
+    pub created_ms: u64,
+    pub board: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub favor: u64,
+    pub against: u64,
+}
+
 /// The materialized read-model. Build one, fold records through [`State::apply`], then query it.
 #[derive(Debug, Default)]
 pub struct State {
@@ -129,6 +182,16 @@ pub struct State {
     follows: HashMap<(String, String), bool>,
 
     streams: HashMap<String, StreamRec>,
+
+    // ----- community governance -----
+    /// board name -> namespace + params.
+    boards: HashMap<String, BoardRec>,
+    /// (board, target_user) -> (voter -> support). Community ban votes.
+    ban_votes: HashMap<(String, String), HashMap<String, bool>>,
+    /// proposal id -> (author, created_ms, proposal).
+    proposals: HashMap<String, (String, u64, PolicyProposal)>,
+    /// proposal id -> (voter -> support).
+    policy_votes: HashMap<String, HashMap<String, bool>>,
 }
 
 impl State {
@@ -169,6 +232,12 @@ impl State {
             Body::StreamStart(s) => self.apply_stream_start(&r.id, &r.author, r.created_ms, s),
             Body::StreamSegment(s) => self.apply_stream_segment(&r.author, s),
             Body::StreamEnd(e) => self.apply_stream_end(&r.author, &e.stream, e.recording_cid.clone()),
+            Body::BoardCreate(b) => self.apply_board_create(&r.id, r.created_ms, b),
+            Body::BanVote(b) => self.apply_ban_vote(&r.author, b),
+            Body::PolicyProposal(p) => {
+                self.proposals.insert(r.id.clone(), (r.author.clone(), r.created_ms, p.clone()));
+            }
+            Body::PolicyVote(v) => self.apply_policy_vote(&r.author, v),
         }
         true
     }
@@ -255,6 +324,49 @@ impl State {
         }
     }
 
+    fn apply_board_create(&mut self, id: &str, created_ms: u64, b: &BoardCreate) {
+        let rank = (created_ms, id.to_string());
+        match self.boards.get_mut(&b.board) {
+            // First claim (smallest rank) wins the namespace + its params, deterministically.
+            Some(existing) if rank < existing.rank => {
+                existing.title = b.title.clone();
+                existing.description = b.description.clone();
+                existing.policy = b.policy.clone();
+                existing.created_ms = created_ms;
+                existing.rank = rank;
+            }
+            Some(_) => {} // a later/non-winning claim: ignore.
+            None => {
+                self.boards.insert(
+                    b.board.clone(),
+                    BoardRec {
+                        title: b.title.clone(),
+                        description: b.description.clone(),
+                        policy: b.policy.clone(),
+                        created_ms,
+                        rank,
+                    },
+                );
+            }
+        }
+    }
+
+    fn apply_ban_vote(&mut self, voter: &str, b: &BanVote) {
+        self.ban_votes
+            .entry((b.board.clone(), b.target.clone()))
+            .or_default()
+            .insert(voter.to_string(), b.support);
+    }
+
+    fn apply_policy_vote(&mut self, voter: &str, v: &PolicyVote) {
+        self.policy_votes.entry(v.proposal.clone()).or_default().insert(voter.to_string(), v.support);
+    }
+
+    /// The community params for a board (defaults if the board was never explicitly created).
+    fn policy_of(&self, board: &str) -> BoardPolicy {
+        self.boards.get(board).map(|b| b.policy.clone()).unwrap_or_default()
+    }
+
     // ----- queries -----
 
     /// A user's profile, if they have published one.
@@ -307,41 +419,90 @@ impl State {
         }
     }
 
-    /// Thread roots in a board, ordered by `sort`, limited to `limit` (use `now_ms` for hotness).
+    /// True if the post's author has been community-banned (raw, unweighted) in its board, so it
+    /// should be hidden from listings.
+    fn hidden(&self, sp: &StoredPost) -> bool {
+        self.is_banned_raw(&sp.post.board, &sp.author)
+    }
+
+    /// Thread roots in a board, ranked by the feed algorithm `sort`, limited to `limit`. New +
+    /// controversial threads get a visibility grace window (per the board's `grace_secs`) so they are
+    /// seen before reception decides; banned authors' threads are hidden.
     pub fn threads(&self, board: &str, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
+        let grace = self.policy_of(board).grace_secs;
         let ids = match self.board_threads.get(board) {
             Some(v) => v,
             None => return Vec::new(),
         };
         let mut views: Vec<PostView> = ids
             .iter()
-            .filter_map(|id| self.posts.get(id).map(|sp| self.view_post(id, sp)))
+            .filter_map(|id| self.posts.get(id).map(|sp| (id, sp)))
+            .filter(|(_, sp)| !self.hidden(sp))
+            .map(|(id, sp)| self.view_post(id, sp))
             .collect();
-        sort_views(&mut views, sort, now_ms);
+        rank_views(&mut views, sort, now_ms, grace);
         views.truncate(limit);
         views
     }
 
     /// Every descendant comment of a thread root, depth-first, each with its tallies. Ordered within
-    /// each sibling group by `sort`.
+    /// each sibling group by `sort`; banned authors' comments are hidden.
     pub fn comments(&self, root: &str, sort: SortBy, now_ms: u64) -> Vec<PostView> {
+        let grace =
+            self.posts.get(root).map(|sp| self.policy_of(&sp.post.board).grace_secs).unwrap_or(0);
         let mut out = Vec::new();
-        self.collect_comments(root, sort, now_ms, &mut out);
+        self.collect_comments(root, sort, now_ms, grace, &mut out);
         out
     }
 
-    fn collect_comments(&self, parent: &str, sort: SortBy, now_ms: u64, out: &mut Vec<PostView>) {
+    fn collect_comments(
+        &self,
+        parent: &str,
+        sort: SortBy,
+        now_ms: u64,
+        grace: u64,
+        out: &mut Vec<PostView>,
+    ) {
         let Some(kids) = self.children.get(parent) else { return };
         let mut views: Vec<PostView> = kids
             .iter()
-            .filter_map(|id| self.posts.get(id).map(|sp| self.view_post(id, sp)))
+            .filter_map(|id| self.posts.get(id).map(|sp| (id, sp)))
+            .filter(|(_, sp)| !self.hidden(sp))
+            .map(|(id, sp)| self.view_post(id, sp))
             .collect();
-        sort_views(&mut views, sort, now_ms);
+        rank_views(&mut views, sort, now_ms, grace);
         for v in views {
             let id = v.id.clone();
             out.push(v);
-            self.collect_comments(&id, sort, now_ms, out);
+            self.collect_comments(&id, sort, now_ms, grace, out);
         }
+    }
+
+    /// A cross-board feed of every (non-hidden) thread root, ranked by `sort`.
+    pub fn all_feed(&self, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
+        let mut views: Vec<PostView> = self
+            .posts
+            .iter()
+            .filter(|(_, sp)| sp.post.is_root() && !self.hidden(sp))
+            .map(|(id, sp)| self.view_post(id, sp))
+            .collect();
+        rank_views(&mut views, sort, now_ms, default_grace());
+        views.truncate(limit);
+        views
+    }
+
+    /// A personalized home feed: thread roots authored by anyone `viewer` follows, ranked by `sort`.
+    pub fn home_feed(&self, viewer: &str, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
+        let follows: HashSet<String> = self.following(viewer).into_iter().collect();
+        let mut views: Vec<PostView> = self
+            .posts
+            .iter()
+            .filter(|(_, sp)| sp.post.is_root() && follows.contains(&sp.author) && !self.hidden(sp))
+            .map(|(id, sp)| self.view_post(id, sp))
+            .collect();
+        rank_views(&mut views, sort, now_ms, default_grace());
+        views.truncate(limit);
+        views
     }
 
     /// Is `follower` following `followee`?

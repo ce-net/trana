@@ -35,9 +35,8 @@ pub mod record;
 pub mod state;
 
 pub use model::{
-    BoardCreate, BoardPolicy, Body, Follow, Link, Media, MediaKind, MediaRef, ModAction,
-    ModActionKind, ModGrant, Post, Profile, Report, StreamEnd, StreamKind, StreamSegment,
-    StreamStart, Vote,
+    BanVote, BoardCreate, BoardPolicy, Body, Follow, Link, Media, MediaKind, MediaRef, PolicyProposal,
+    PolicyVote, Post, Profile, StreamEnd, StreamKind, StreamSegment, StreamStart, Vote,
 };
 pub use record::{canonical_bytes, Record, RecordError};
 pub use state::{PostView, ProfileView, SortBy, State, StreamView};
