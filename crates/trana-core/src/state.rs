@@ -8,8 +8,8 @@
 //! the backend genuinely distributed rather than a single source of truth.
 
 use crate::model::{
-    BanVote, BoardCreate, BoardPolicy, Body, Media, PolicyProposal, PolicyVote, Post, Profile,
-    StreamSegment, StreamStart,
+    BanVote, BoardCreate, BoardPolicy, Body, Document, Media, PolicyProposal, PolicyVote, Post,
+    Profile, Ref, StreamSegment, StreamStart,
 };
 use crate::record::Record;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -121,6 +121,26 @@ struct BoardRec {
     rank: (u64, String),
 }
 
+/// A document as returned to readers: the markdown artifact, its references (forward links), the
+/// references that point AT it (backlinks), and its vote tally — documents are votable like posts.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DocumentView {
+    pub id: String,
+    pub author: String,
+    pub created_ms: u64,
+    pub title: String,
+    pub body: String,
+    pub board: Option<String>,
+    /// All references this document makes (declared `refs` + any parsed from the markdown body), as
+    /// `trana://...` URIs — the clean, mesh-resolvable content addresses.
+    pub refs: Vec<String>,
+    /// `trana://...` URIs of content that references THIS document (backlinks).
+    pub referenced_by: Vec<String>,
+    pub ups: u64,
+    pub downs: u64,
+    pub score: i64,
+}
+
 /// A board namespace view.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BoardView {
@@ -183,6 +203,11 @@ pub struct State {
 
     streams: HashMap<String, StreamRec>,
 
+    /// document id -> (author, created_ms, document).
+    documents: HashMap<String, (String, u64, Document)>,
+    /// referenced content id -> the `trana://...` URIs that reference it (backlinks).
+    backlinks: HashMap<String, Vec<String>>,
+
     // ----- community governance -----
     /// board name -> namespace + params.
     boards: HashMap<String, BoardRec>,
@@ -232,6 +257,7 @@ impl State {
             Body::StreamStart(s) => self.apply_stream_start(&r.id, &r.author, r.created_ms, s),
             Body::StreamSegment(s) => self.apply_stream_segment(&r.author, s),
             Body::StreamEnd(e) => self.apply_stream_end(&r.author, &e.stream, e.recording_cid.clone()),
+            Body::Document(d) => self.apply_document(&r.id, &r.author, r.created_ms, d),
             Body::BoardCreate(b) => self.apply_board_create(&r.id, r.created_ms, b),
             Body::BanVote(b) => self.apply_ban_vote(&r.author, b),
             Body::PolicyProposal(p) => {
@@ -324,6 +350,31 @@ impl State {
         }
     }
 
+    fn apply_document(&mut self, id: &str, author: &str, created_ms: u64, d: &Document) {
+        // Index backlinks: every ref this document makes (declared + inline in markdown) records a
+        // backlink from this document to the referenced content.
+        let self_uri = crate::model::Ref::document(id).to_uri();
+        for r in self.doc_all_refs(d) {
+            let entry = self.backlinks.entry(r.id.clone()).or_default();
+            if !entry.contains(&self_uri) {
+                entry.push(self_uri.clone());
+            }
+        }
+        self.documents.insert(id.to_string(), (author.to_string(), created_ms, d.clone()));
+    }
+
+    /// All references a document makes: its declared `refs` plus any parsed inline from the markdown,
+    /// de-duplicated.
+    fn doc_all_refs(&self, d: &Document) -> Vec<Ref> {
+        let mut all = d.refs.clone();
+        for r in crate::model::extract_refs(&d.body) {
+            if !all.contains(&r) {
+                all.push(r);
+            }
+        }
+        all
+    }
+
     fn apply_board_create(&mut self, id: &str, created_ms: u64, b: &BoardCreate) {
         let rank = (created_ms, id.to_string());
         match self.boards.get_mut(&b.board) {
@@ -393,6 +444,42 @@ impl State {
             .collect();
         v.sort_by(|a, b| b.1.cmp(&a.1));
         v.into_iter().map(|(id, _, m)| (id, m)).collect()
+    }
+
+    /// A document by id, with its forward refs, backlinks, and vote tally.
+    pub fn document(&self, id: &str) -> Option<DocumentView> {
+        let (author, created_ms, d) = self.documents.get(id)?;
+        let (ups, downs) = self.tally.get(id).copied().unwrap_or((0, 0));
+        Some(DocumentView {
+            id: id.to_string(),
+            author: author.clone(),
+            created_ms: *created_ms,
+            title: d.title.clone(),
+            body: d.body.clone(),
+            board: d.board.clone(),
+            refs: self.doc_all_refs(d).iter().map(|r| r.to_uri()).collect(),
+            referenced_by: self.backlinks.get(id).cloned().unwrap_or_default(),
+            ups,
+            downs,
+            score: ups as i64 - downs as i64,
+        })
+    }
+
+    /// All documents authored by a user, newest first.
+    pub fn documents_by(&self, author: &str) -> Vec<DocumentView> {
+        let mut ids: Vec<(String, u64)> = self
+            .documents
+            .iter()
+            .filter(|(_, (a, _, _))| a == author)
+            .map(|(id, (_, t, _))| (id.clone(), *t))
+            .collect();
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
+        ids.into_iter().filter_map(|(id, _)| self.document(&id)).collect()
+    }
+
+    /// The `trana://...` URIs that reference content `id` (backlinks) — works for any kind of target.
+    pub fn backlinks(&self, id: &str) -> Vec<String> {
+        self.backlinks.get(id).cloned().unwrap_or_default()
     }
 
     /// A single post/comment view.
@@ -689,6 +776,16 @@ impl State {
                 k.comments += 1;
                 k.comment_score += net;
             }
+        }
+        // Documents are votable content too: their net score counts toward the author's karma.
+        for (id, (a, _, _)) in &self.documents {
+            if a != node_id {
+                continue;
+            }
+            let (ups, downs) = self.tally.get(id).copied().unwrap_or((0, 0));
+            k.upvotes += ups;
+            k.downvotes += downs;
+            k.post_score += ups as i64 - downs as i64;
         }
         k.followers = self.followers(node_id).len() as u64;
         k
@@ -1162,5 +1259,50 @@ mod tests {
         assert_eq!(home[0].id, fp.id);
         // The global feed shows both.
         assert_eq!(s.all_feed(SortBy::New, 10, 100).len(), 2);
+    }
+
+    // ----- content addressing + documents -----
+    use crate::model::{extract_refs, Document, Ref};
+
+    #[test]
+    fn ref_uri_roundtrip_and_extract() {
+        assert_eq!(Ref::post("abc").to_uri(), "trana://post/abc");
+        assert_eq!(Ref::parse("trana://post/abc"), Some(Ref::post("abc")));
+        assert_eq!(Ref::parse("https://example.com"), None);
+        assert_eq!(Ref::parse("trana://post/"), None);
+        let md = "see [this](trana://document/d1) and trana://media/m2, also trana://post/p3.";
+        let refs = extract_refs(md);
+        assert_eq!(refs, vec![Ref::document("d1"), Ref::media("m2"), Ref::post("p3")]);
+    }
+
+    #[test]
+    fn documents_refs_backlinks_votes_and_karma() {
+        let mut s = State::new();
+        let a = "aa".repeat(32);
+        let p0 = root(&a, "b", 1, "target");
+        s.apply(&p0);
+        let doc = Record::new(
+            &a,
+            2,
+            Body::Document(Document {
+                title: "essay".into(),
+                body: format!("citing trana://post/{}", p0.id),
+                refs: vec![Ref::media("m9")],
+                board: Some("b".into()),
+            }),
+        )
+        .unwrap();
+        s.apply(&doc);
+
+        let dv = s.document(&doc.id).unwrap();
+        assert!(dv.refs.contains(&Ref::media("m9").to_uri()), "declared ref present");
+        assert!(dv.refs.contains(&Ref::post(&p0.id).to_uri()), "inline markdown ref parsed");
+        // Backlink: the post knows the document references it.
+        assert_eq!(s.backlinks(&p0.id), vec![Ref::document(&doc.id).to_uri()]);
+        // Documents are votable and contribute to the author's karma.
+        s.apply(&vote(&"bb".repeat(32), 3, &doc.id, 1));
+        assert_eq!(s.document(&doc.id).unwrap().score, 1);
+        assert_eq!(s.social(&a).post_score, 1);
+        assert_eq!(s.documents_by(&a).len(), 1);
     }
 }

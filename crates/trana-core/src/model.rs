@@ -30,6 +30,8 @@ pub enum Body {
     StreamSegment(StreamSegment),
     /// End a live stream, optionally publishing a full recording object.
     StreamEnd(StreamEnd),
+    /// A standalone markdown document that can reference any content (recursively).
+    Document(Document),
     /// Register a board (a community namespace) and its community params. First claim sets it.
     BoardCreate(BoardCreate),
     /// A community vote to ban (or keep) a user in a board. No mods — the community decides.
@@ -52,6 +54,7 @@ impl Body {
             Body::StreamStart(_) => "stream_start",
             Body::StreamSegment(_) => "stream_segment",
             Body::StreamEnd(_) => "stream_end",
+            Body::Document(_) => "document",
             Body::BoardCreate(_) => "board_create",
             Body::BanVote(_) => "ban_vote",
             Body::PolicyProposal(_) => "policy_proposal",
@@ -237,6 +240,160 @@ pub struct StreamEnd {
     /// Optional CE object CID of the full recording (for replay after the live edge ends).
     #[serde(default)]
     pub recording_cid: Option<String>,
+}
+
+// =============================== content addressing ===============================
+//
+// trana cannot use HTTP URLs — content lives on the mesh, addressed by content hash / NodeId, served
+// by whichever nodes hold it. So references use a clean mesh-native scheme: `trana://<kind>/<id>`.
+//
+//   trana://post/<record-id>       a post or comment (record id = sha256 of its canonical body)
+//   trana://document/<record-id>   a document (markdown artifact)
+//   trana://media/<record-id>      a media descriptor (image/video/audio/podcast/document file)
+//   trana://stream/<record-id>     a live stream
+//   trana://profile/<node-id>      a user profile (addressed by their NodeId)
+//   trana://board/<name>           a board (community namespace)
+//   trana://blob/<cid>             a raw content-addressed object (the bytes themselves)
+//
+// `id` is already a content address for everything except profile (NodeId) and board (name), both of
+// which are stable identifiers. A reference is resolved by calling the matching mesh RPC — never an
+// HTTP fetch — so the same `trana://` link resolves from any node, browser, or phone on the mesh.
+
+/// What a [`Ref`] points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefKind {
+    Post,
+    Document,
+    Media,
+    Stream,
+    Profile,
+    Board,
+    Blob,
+}
+
+impl RefKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RefKind::Post => "post",
+            RefKind::Document => "document",
+            RefKind::Media => "media",
+            RefKind::Stream => "stream",
+            RefKind::Profile => "profile",
+            RefKind::Board => "board",
+            RefKind::Blob => "blob",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RefKind> {
+        Some(match s {
+            "post" => RefKind::Post,
+            "document" | "doc" => RefKind::Document,
+            "media" => RefKind::Media,
+            "stream" => RefKind::Stream,
+            "profile" => RefKind::Profile,
+            "board" => RefKind::Board,
+            "blob" => RefKind::Blob,
+            _ => return None,
+        })
+    }
+}
+
+/// A mesh-native content reference: `trana://<kind>/<id>`. The unit of "this post/document references
+/// that content," resolvable over the mesh from anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ref {
+    pub kind: RefKind,
+    pub id: String,
+}
+
+impl Ref {
+    pub fn new(kind: RefKind, id: impl Into<String>) -> Ref {
+        Ref { kind, id: id.into() }
+    }
+    pub fn post(id: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Post, id)
+    }
+    pub fn document(id: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Document, id)
+    }
+    pub fn media(id: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Media, id)
+    }
+    pub fn stream(id: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Stream, id)
+    }
+    pub fn profile(node_id: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Profile, node_id)
+    }
+    pub fn board(name: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Board, name)
+    }
+    pub fn blob(cid: impl Into<String>) -> Ref {
+        Ref::new(RefKind::Blob, cid)
+    }
+
+    /// The canonical `trana://<kind>/<id>` URI.
+    pub fn to_uri(&self) -> String {
+        format!("trana://{}/{}", self.kind.as_str(), self.id)
+    }
+
+    /// Parse a `trana://<kind>/<id>` URI. Returns `None` if it is not a well-formed trana ref.
+    pub fn parse(uri: &str) -> Option<Ref> {
+        let rest = uri.strip_prefix("trana://")?;
+        let (kind, id) = rest.split_once('/')?;
+        let kind = RefKind::parse(kind)?;
+        if id.is_empty() {
+            return None;
+        }
+        Some(Ref { kind, id: id.to_string() })
+    }
+}
+
+/// Extract every `trana://...` reference embedded in a markdown body, in order, de-duplicated. This
+/// is how a markdown post/document "references any content": you write `trana://post/<id>` links and
+/// the backend can index them — no HTTP, no out-of-band metadata.
+pub fn extract_refs(markdown: &str) -> Vec<Ref> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = markdown.as_bytes();
+    let mut i = 0;
+    while let Some(pos) = markdown[i..].find("trana://") {
+        let start = i + pos;
+        // Read until a character that can't be part of the URI (markdown/whitespace/closers).
+        let mut end = start;
+        while end < bytes.len() {
+            let c = bytes[end] as char;
+            if c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'' | '`' | '|') {
+                break;
+            }
+            end += 1;
+        }
+        let token = markdown[start..end].trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':'));
+        if let Some(r) = Ref::parse(token) {
+            if seen.insert(r.to_uri()) {
+                out.push(r);
+            }
+        }
+        i = end.max(start + 1);
+    }
+    out
+}
+
+/// A document: a standalone markdown artifact that can reference any other content (recursively —
+/// documents can reference documents). Addressed by its record id (`trana://document/<id>`), votable
+/// and karma-bearing like a post, but not part of a thread.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    pub title: String,
+    /// Markdown body. May embed `trana://...` references inline.
+    pub body: String,
+    /// Explicit references this document declares (in addition to any inline in `body`).
+    #[serde(default)]
+    pub refs: Vec<Ref>,
+    /// Optional board to surface the document in.
+    #[serde(default)]
+    pub board: Option<String>,
 }
 
 // =============================== community governance ===============================
