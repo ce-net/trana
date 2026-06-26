@@ -28,6 +28,13 @@ import type {
 
 export * from "./types.js";
 export { TranaError, type ClientOptions } from "./client.js";
+export {
+  type Platform,
+  type Profile,
+  profile,
+  reconnectBackoffMs,
+  detectPlatform,
+} from "./platform.js";
 
 const T = {
   profilePut: "trana/profile/put/v1",
