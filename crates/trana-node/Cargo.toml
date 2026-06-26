@@ -18,6 +18,8 @@ path = "src/lib.rs"
 [dependencies]
 trana-core = { path = "../trana-core" }
 ce-rs.workspace = true
+# Capability verifier (ce-iam / ce-cap) for delegated "act-as" authentication.
+ce-cap = { path = "../../../ce/crates/ce-cap" }
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
