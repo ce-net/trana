@@ -186,4 +186,52 @@ impl TranaClient {
     pub async fn streams_live(&self) -> Result<proto::StreamsLiveResp> {
         self.call::<(), _>(proto::T_STREAMS_LIVE, &()).await
     }
+
+    // ----- community governance -----
+
+    pub async fn board_put(&self, req: proto::BoardPutReq) -> Result<proto::IdResp> {
+        self.call(proto::T_BOARD_PUT, &req).await
+    }
+
+    pub async fn board_get(&self, board: &str) -> Result<proto::BoardResp> {
+        self.call(proto::T_BOARD_GET, &proto::BoardGetReq { board: board.into() }).await
+    }
+
+    pub async fn boards(&self) -> Result<proto::BoardsResp> {
+        self.call::<(), _>(proto::T_BOARDS, &()).await
+    }
+
+    /// A feed ranked by any algorithm (hot, top, new, best, trending, rising, controversial).
+    pub async fn feed(&self, req: proto::FeedReq) -> Result<proto::ThreadsResp> {
+        self.call(proto::T_FEED, &req).await
+    }
+
+    /// Cast a community ban vote (`support = true` to ban, `false` to keep).
+    pub async fn ban_vote(&self, board: &str, target: &str, support: bool, reason: &str) -> Result<proto::OkResp> {
+        self.call(
+            proto::T_BANVOTE,
+            &proto::BanVoteReq { board: board.into(), target: target.into(), support, reason: reason.into() },
+        )
+        .await
+    }
+
+    pub async fn ban_standing(&self, board: &str, target: &str) -> Result<proto::BanStandingResp> {
+        self.call(proto::T_BANSTANDING, &proto::BanStandingReq { board: board.into(), target: target.into() }).await
+    }
+
+    pub async fn policy_propose(&self, req: proto::PolicyProposeReq) -> Result<proto::IdResp> {
+        self.call(proto::T_POLICY_PROPOSE, &req).await
+    }
+
+    pub async fn policy_vote(&self, proposal: &str, support: bool) -> Result<proto::OkResp> {
+        self.call(proto::T_POLICY_VOTE, &proto::PolicyVoteReq { proposal: proposal.into(), support }).await
+    }
+
+    pub async fn proposals(&self, board: Option<&str>) -> Result<proto::ProposalsResp> {
+        self.call(proto::T_PROPOSALS, &proto::ProposalsReq { board: board.map(|s| s.to_string()) }).await
+    }
+
+    pub async fn proposal(&self, id: &str) -> Result<proto::ProposalResp> {
+        self.call(proto::T_PROPOSAL_GET, &proto::ProposalGetReq { id: id.into() }).await
+    }
 }

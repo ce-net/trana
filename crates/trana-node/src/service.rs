@@ -74,6 +74,38 @@ impl TranaService {
                 Err(e) => Envelope::err(e),
             },
             proto::T_STREAMS_LIVE => Envelope::ok(&self.engine.streams_live()),
+            // ----- community governance -----
+            proto::T_BOARD_PUT => self.write_reply(parse(p).map(|r| self.engine.board_put(from, r))).await,
+            proto::T_BOARD_GET => match parse::<proto::BoardGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.board_get(&r.board)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_BOARDS => Envelope::ok(&self.engine.boards()),
+            proto::T_FEED => match parse::<proto::FeedReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.feed(r)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_BANVOTE => match parse::<proto::BanVoteReq>(p) {
+                Ok(r) => env(self.engine.ban_vote(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_BANSTANDING => match parse::<proto::BanStandingReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.ban_standing(&r.board, &r.target)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_POLICY_PROPOSE => self.write_reply(parse(p).map(|r| self.engine.policy_propose(from, r))).await,
+            proto::T_POLICY_VOTE => match parse::<proto::PolicyVoteReq>(p) {
+                Ok(r) => env(self.engine.policy_vote(from, r).await),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_PROPOSALS => match parse::<proto::ProposalsReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.proposals(r.board.as_deref())),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_PROPOSAL_GET => match parse::<proto::ProposalGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.proposal_get(&r.id)),
+                Err(e) => Envelope::err(e),
+            },
             proto::T_REPLICATE => Envelope::ok(&self.engine.replicate(p).await),
             other => Envelope::err(format!("unknown topic: {other}")),
         }

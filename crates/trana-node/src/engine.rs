@@ -260,6 +260,110 @@ impl Engine {
         StreamsLiveResp { streams: self.store.live_streams() }
     }
 
+    // ----- community governance -----
+
+    pub async fn board_put(&self, author: &str, req: BoardPutReq) -> Result<IdResp> {
+        let body = Body::BoardCreate(BoardCreate {
+            board: req.board,
+            title: req.title,
+            description: req.description,
+            policy: req.policy,
+        });
+        let id = self.write(author, body, vec![], 0).await?;
+        Ok(IdResp { id })
+    }
+
+    pub fn board_get(&self, board: &str) -> BoardResp {
+        BoardResp { board: self.store.board(board) }
+    }
+
+    pub fn boards(&self) -> BoardsResp {
+        BoardsResp { boards: self.store.boards() }
+    }
+
+    /// A board / cross-board / home feed, ranked by any feed algorithm.
+    pub fn feed(&self, req: FeedReq) -> ThreadsResp {
+        let sort = SortBy::parse(&req.sort);
+        let now = now_ms();
+        let limit = req.limit.min(500);
+        let threads = match req.scope.as_str() {
+            "board" => self.store.threads(req.board.as_deref().unwrap_or(""), sort, limit, now),
+            "home" => self.store.home_feed(req.viewer.as_deref().unwrap_or(""), sort, limit, now),
+            _ => self.store.all_feed(sort, limit, now),
+        };
+        ThreadsResp { threads }
+    }
+
+    pub async fn ban_vote(&self, author: &str, req: BanVoteReq) -> Result<OkResp> {
+        // Ban voting itself is gated by the board's vote-trust floor (so a sybil swarm can't brigade
+        // a ban). The author cannot vote while themselves banned.
+        self.deny_if_banned(&req.board, author)?;
+        self.require_trust(author, self.store.board_policy(&req.board).min_trust_to_vote, "ban voting")
+            .await?;
+        self.write(
+            author,
+            Body::BanVote(BanVote {
+                board: req.board,
+                target: req.target,
+                support: req.support,
+                reason: req.reason,
+            }),
+            vec![],
+            0,
+        )
+        .await?;
+        Ok(OkResp { ok: true })
+    }
+
+    /// A user's community ban standing: the raw one-person-one-vote tally plus the node's
+    /// trust-weighted ("respect"-weighted) verdict.
+    pub fn ban_standing(&self, board: &str, target: &str) -> BanStandingResp {
+        let standing = self.store.ban_standing(board, target);
+        let policy = self.store.board_policy(board);
+        let mut w_support = 0.0;
+        let mut w_total = 0.0;
+        for (voter, support) in self.store.ban_votes_raw(board, target) {
+            let w = self.social_weight(&voter);
+            w_total += w;
+            if support {
+                w_support += w;
+            }
+        }
+        let weighted_support = if w_total > 0.0 { w_support / w_total } else { 0.0 };
+        let banned = (standing.support + standing.oppose) >= policy.ban_quorum as u64
+            && weighted_support >= policy.ban_support;
+        BanStandingResp { standing, weighted_support, banned }
+    }
+
+    pub async fn policy_propose(&self, author: &str, req: PolicyProposeReq) -> Result<IdResp> {
+        let body = Body::PolicyProposal(PolicyProposal {
+            board: req.board,
+            title: req.title,
+            body: req.body,
+        });
+        let id = self.write(author, body, vec![], 0).await?;
+        Ok(IdResp { id })
+    }
+
+    pub async fn policy_vote(&self, author: &str, req: PolicyVoteReq) -> Result<OkResp> {
+        self.write(
+            author,
+            Body::PolicyVote(PolicyVote { proposal: req.proposal, support: req.support }),
+            vec![],
+            0,
+        )
+        .await?;
+        Ok(OkResp { ok: true })
+    }
+
+    pub fn proposals(&self, board: Option<&str>) -> ProposalsResp {
+        ProposalsResp { proposals: self.store.proposals(board) }
+    }
+
+    pub fn proposal_get(&self, id: &str) -> ProposalResp {
+        ProposalResp { proposal: self.store.proposal(id) }
+    }
+
     // ----- replication (internal) -----
 
     /// Handle a directed replication push: ingest the record and pull its objects.
