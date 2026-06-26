@@ -1018,4 +1018,149 @@ mod tests {
         // Reference it from a post.
         let _ = MediaRef::new(rec.id);
     }
+
+    // ----- community governance -----
+    use crate::model::{BanVote, BoardCreate, BoardPolicy, PolicyProposal, PolicyVote};
+
+    fn ban_vote(voter: &str, board: &str, target: &str, support: bool, t: u64) -> Record {
+        Record::new(
+            voter,
+            t,
+            Body::BanVote(BanVote { board: board.into(), target: target.into(), support, reason: "".into() }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn board_create_first_claim_wins() {
+        let mut s = State::new();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let mut pol = BoardPolicy::default();
+        pol.min_trust_to_vote = 0.3;
+        // Two claims of the same board; the earlier (smaller created_ms) must win.
+        let late = Record::new(&a, 50, Body::BoardCreate(BoardCreate {
+            board: "ce".into(), title: "Late".into(), description: "".into(), policy: BoardPolicy::default(),
+        })).unwrap();
+        let early = Record::new(&b, 10, Body::BoardCreate(BoardCreate {
+            board: "ce".into(), title: "Early".into(), description: "first".into(), policy: pol,
+        })).unwrap();
+        // Apply out of order: late first, then early.
+        s.apply(&late);
+        s.apply(&early);
+        let bv = s.board("ce");
+        assert_eq!(bv.title, "Early", "earliest claim wins regardless of arrival order");
+        assert!((bv.policy.min_trust_to_vote - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn community_ban_needs_quorum_and_majority() {
+        let mut s = State::new();
+        let target = "ff".repeat(32);
+        // A board with a small quorum so the test is concise.
+        let mut pol = BoardPolicy::default();
+        pol.ban_quorum = 3;
+        pol.ban_support = 0.66;
+        s.apply(&Record::new(&"00".repeat(32), 1, Body::BoardCreate(BoardCreate {
+            board: "b".into(), title: "".into(), description: "".into(), policy: pol,
+        })).unwrap());
+
+        // 2 support, 0 oppose: below quorum (3) → not banned.
+        s.apply(&ban_vote(&"11".repeat(32), "b", &target, true, 2));
+        s.apply(&ban_vote(&"22".repeat(32), "b", &target, true, 2));
+        assert!(!s.is_banned_raw("b", &target));
+
+        // 3rd supporter → quorum met, 3/3 in favor → banned.
+        s.apply(&ban_vote(&"33".repeat(32), "b", &target, true, 2));
+        assert!(s.is_banned_raw("b", &target));
+        let st = s.ban_standing("b", &target);
+        assert_eq!((st.support, st.oppose), (3, 0));
+
+        // Opposition pulls it back below the 66% support fraction → un-banned (community keeps them).
+        s.apply(&ban_vote(&"44".repeat(32), "b", &target, false, 3));
+        s.apply(&ban_vote(&"55".repeat(32), "b", &target, false, 3));
+        assert!(!s.is_banned_raw("b", &target), "3/5 = 60% < 66% support → not banned");
+    }
+
+    #[test]
+    fn banned_authors_content_is_hidden() {
+        let mut s = State::new();
+        let outcast = "ee".repeat(32);
+        let mut pol = BoardPolicy::default();
+        pol.ban_quorum = 2;
+        s.apply(&Record::new(&"00".repeat(32), 1, Body::BoardCreate(BoardCreate {
+            board: "b".into(), title: "".into(), description: "".into(), policy: pol,
+        })).unwrap());
+        let p = root(&outcast, "b", 5, "unpopular take");
+        s.apply(&p);
+        assert_eq!(s.threads("b", SortBy::New, 10, 100).len(), 1);
+        // Community bans the author.
+        s.apply(&ban_vote(&"11".repeat(32), "b", &outcast, true, 6));
+        s.apply(&ban_vote(&"22".repeat(32), "b", &outcast, true, 6));
+        assert!(s.is_banned_raw("b", &outcast));
+        assert_eq!(s.threads("b", SortBy::New, 10, 100).len(), 0, "banned author hidden from feed");
+    }
+
+    #[test]
+    fn grace_window_gives_controversial_posts_visibility() {
+        // The signature behavior: during the grace window a heavily-DOWNVOTED young post still
+        // outranks an old, mildly-positive post in the default (Hot) feed — controversy gets seen.
+        let mut s = State::new();
+        let board = "b"; // default policy: 6h grace
+        let now: u64 = 100_000_000; // ms
+        // Old post (10h old, +5 net) — well past grace.
+        let old = root(&"a1".repeat(16).repeat(2), board, now - 10 * 3_600_000, "old & liked");
+        // Young controversial post (10 min old, net NEGATIVE but lots of engagement).
+        let young = root(&"b1".repeat(16).repeat(2), board, now - 10 * 60_000, "hot take");
+        s.apply(&old);
+        s.apply(&young);
+        // old: +5 net (5 ups)
+        for i in 0..5 { s.apply(&vote(&format!("{:064x}", 1000 + i), now, &old.id, 1)); }
+        // young: 3 up / 9 down = net -6, engagement 12
+        for i in 0..3 { s.apply(&vote(&format!("{:064x}", 2000 + i), now, &young.id, 1)); }
+        for i in 0..9 { s.apply(&vote(&format!("{:064x}", 3000 + i), now, &young.id, -1)); }
+
+        let feed = s.threads(board, SortBy::Hot, 10, now);
+        assert_eq!(feed[0].id, young.id, "controversial young post is surfaced first during grace");
+        // But Top (pure reception) correctly ranks the liked old post above the booed one.
+        let top = s.threads(board, SortBy::Top, 10, now);
+        assert_eq!(top[0].id, old.id);
+        // Controversial sort surfaces the split post.
+        let contro = s.threads(board, SortBy::Controversial, 10, now);
+        assert_eq!(contro[0].id, young.id);
+    }
+
+    #[test]
+    fn policy_proposals_and_votes() {
+        let mut s = State::new();
+        let prop = Record::new(&"aa".repeat(32), 1, Body::PolicyProposal(PolicyProposal {
+            board: Some("b".into()), title: "No spam".into(), body: "links only with context".into(),
+        })).unwrap();
+        s.apply(&prop);
+        s.apply(&Record::new(&"11".repeat(32), 2, Body::PolicyVote(PolicyVote { proposal: prop.id.clone(), support: true })).unwrap());
+        s.apply(&Record::new(&"22".repeat(32), 2, Body::PolicyVote(PolicyVote { proposal: prop.id.clone(), support: true })).unwrap());
+        s.apply(&Record::new(&"33".repeat(32), 2, Body::PolicyVote(PolicyVote { proposal: prop.id.clone(), support: false })).unwrap());
+        let pv = s.proposal(&prop.id).unwrap();
+        assert_eq!((pv.favor, pv.against), (2, 1));
+        assert_eq!(s.proposals(Some("b")).len(), 1);
+        assert_eq!(s.proposals(Some("other")).len(), 0);
+    }
+
+    #[test]
+    fn home_feed_is_follows_only() {
+        let mut s = State::new();
+        let me = "aa".repeat(32);
+        let friend = "bb".repeat(32);
+        let stranger = "cc".repeat(32);
+        s.apply(&Record::new(&me, 1, Body::Follow(crate::model::Follow { followee: friend.clone(), active: true })).unwrap());
+        let fp = root(&friend, "b", 10, "from a friend");
+        let sp = root(&stranger, "b", 11, "from a stranger");
+        s.apply(&fp);
+        s.apply(&sp);
+        let home = s.home_feed(&me, SortBy::New, 10, 100);
+        assert_eq!(home.len(), 1);
+        assert_eq!(home[0].id, fp.id);
+        // The global feed shows both.
+        assert_eq!(s.all_feed(SortBy::New, 10, 100).len(), 2);
+    }
 }
