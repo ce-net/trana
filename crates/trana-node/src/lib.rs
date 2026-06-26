@@ -5,6 +5,7 @@
 //! replication subscriber, and the DHT re-advertise heartbeat that keeps the node discoverable via
 //! `locate`. The binary in `main.rs` is a thin CLI over this.
 
+pub mod auth;
 pub mod compute;
 pub mod engine;
 pub mod replicate;
@@ -44,7 +45,7 @@ impl Node {
         let store = Arc::new(Store::open(data_dir)?);
         let compute = ComputeProbe::new(ce.clone());
         let replicator = Replicator::new(ce.clone(), self_id.clone());
-        let engine = Arc::new(Engine::new(store.clone(), compute, replicator));
+        let engine = Arc::new(Engine::new(store.clone(), ce.clone(), compute, replicator));
         Ok(Node { ce, self_id, engine, store })
     }
 }

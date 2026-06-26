@@ -25,7 +25,14 @@ impl TranaService {
 
     /// Dispatch one request to the right engine method, returning the reply envelope bytes.
     async fn dispatch(&self, req: Request) -> Envelope {
-        let from = req.from.as_str();
+        // Resolve the effective author: the authenticated sender, or a delegated identity if the
+        // request carries a valid ce-cap "act-as" capability. A bad/forged delegation is rejected
+        // here, before any handler runs.
+        let from_owned = match self.engine.resolve_author(&req.from, &req.payload).await {
+            Ok(f) => f,
+            Err(e) => return Envelope::err(e.to_string()),
+        };
+        let from = from_owned.as_str();
         let p = req.payload.as_slice();
         match req.topic.as_str() {
             proto::T_PROFILE_PUT => self.write_reply(parse(p).map(|r| self.engine.profile_put(from, r))).await,

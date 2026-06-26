@@ -32,14 +32,34 @@ fn now_ms() -> u64 {
 /// Shared application logic behind every front end.
 pub struct Engine {
     store: Arc<Store>,
+    ce: ce_rs::CeClient,
     compute: ComputeProbe,
     replicator: Replicator,
     weights: Weights,
 }
 
 impl Engine {
-    pub fn new(store: Arc<Store>, compute: ComputeProbe, replicator: Replicator) -> Self {
-        Engine { store, compute, replicator, weights: Weights::default() }
+    pub fn new(store: Arc<Store>, ce: ce_rs::CeClient, compute: ComputeProbe, replicator: Replicator) -> Self {
+        Engine { store, ce, compute, replicator, weights: Weights::default() }
+    }
+
+    /// Resolve the effective author of a write: normally the authenticated sender `from`, but if the
+    /// request carries `_as` (a claimed author) + `_cap` (a ce-cap capability), verify the delegation
+    /// and return the claimed author. A claimed author without a valid capability is rejected.
+    pub async fn resolve_author(&self, from: &str, payload: &[u8]) -> Result<String> {
+        let v: serde_json::Value = serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null);
+        let as_author = v.get("_as").and_then(|x| x.as_str());
+        let cap = v.get("_cap").and_then(|x| x.as_str());
+        match (as_author, cap) {
+            (Some(u), Some(token)) => {
+                crate::auth::verify_act_as(&self.ce, u, from, token).await?;
+                Ok(u.to_string())
+            }
+            (Some(_), None) => {
+                anyhow::bail!("acting as another identity requires a capability (_cap)")
+            }
+            _ => Ok(from.to_string()),
+        }
     }
 
     pub fn store(&self) -> &Arc<Store> {
