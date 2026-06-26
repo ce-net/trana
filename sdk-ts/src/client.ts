@@ -40,7 +40,9 @@ function fromHex(hex: string): Uint8Array {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  // A Uint8Array is a valid BufferSource at runtime; the cast sidesteps TS 5.7's generic
+  // Uint8Array<ArrayBufferLike> variance against BufferSource.
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return toHex(new Uint8Array(digest));
 }
 
@@ -179,7 +181,7 @@ export class TranaClient {
     const r = await this.fetchImpl(this.url(`/blobs`), {
       method: "POST",
       headers: this.headers(false),
-      body: bytes,
+      body: bytes as BodyInit,
     });
     if (!r.ok) throw new TranaError(`blob upload HTTP ${r.status}`);
     const j = (await r.json()) as { hash?: string };

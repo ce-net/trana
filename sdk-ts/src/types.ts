@@ -87,11 +87,16 @@ export interface BoardView {
 export interface SocialKarma {
   posts: number;
   comments: number;
+  /** Raw net post score (one-vote-one-count), for display. */
   post_score: number;
   comment_score: number;
   upvotes: number;
   downvotes: number;
   followers: number;
+  /** Trust-weighted, time-decayed net karma — the number that actually drives trust. A vote from a
+   *  low-trust account barely moves it, so karma can't be farmed. Equals the raw karma only in the
+   *  weightless/degraded path. */
+  effective_score: number;
 }
 
 export interface ComputeTrust {
@@ -107,12 +112,24 @@ export interface ComputeTrust {
 }
 
 export interface TrustScore {
+  /** Raw net karma (display). */
   karma: number;
+  /** Effective (trust-weighted, decayed) social score that fed the social term. */
+  social_score: number;
   social_term: number;
   delivered_work: number;
   reliability: number;
   compute_term: number;
+  /** Web-of-trust rank in 0..1 (0 when no graph was computed). */
+  graph_rank: number;
+  /** Graph term in 0..1 (currently the rank itself). */
+  graph_term: number;
   combined: number;
+}
+
+/** Personalized web-of-trust ranks: `[node_id, rank]` pairs (rank in 0..1), highest first. */
+export interface PersonalTrustResp {
+  ranks: [NodeId, number][];
 }
 
 export interface ProfileResp {

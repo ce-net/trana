@@ -180,14 +180,35 @@ impl TranaClient {
         self.call(proto::T_VOTE, &proto::VoteReq { target: target.into(), value }).await
     }
 
+    /// Upvote a post/comment/document.
+    pub async fn upvote(&self, target: &str) -> Result<proto::OkResp> {
+        self.vote(target, 1).await
+    }
+    /// Downvote.
+    pub async fn downvote(&self, target: &str) -> Result<proto::OkResp> {
+        self.vote(target, -1).await
+    }
+    /// Clear your vote.
+    pub async fn unvote(&self, target: &str) -> Result<proto::OkResp> {
+        self.vote(target, 0).await
+    }
+
     pub async fn follow(&self, followee: &str, active: bool) -> Result<proto::OkResp> {
         self.call(proto::T_FOLLOW, &proto::FollowReq { followee: followee.into(), active }).await
+    }
+    /// Stop following.
+    pub async fn unfollow(&self, followee: &str) -> Result<proto::OkResp> {
+        self.follow(followee, false).await
     }
 
     /// Publish this device's consent to belong to `owner` (the device half of the mutual binding
     /// that lets the owner's profile roll up this device's compute trust). Call from the device.
     pub async fn link_device(&self, owner: &str, active: bool) -> Result<proto::OkResp> {
         self.call(proto::T_DEVICE_LINK, &proto::DeviceLinkReq { owner: owner.into(), active }).await
+    }
+    /// Revoke this device's link to `owner`.
+    pub async fn unlink_device(&self, owner: &str) -> Result<proto::OkResp> {
+        self.link_device(owner, false).await
     }
 
     // ----- karma / trust -----
@@ -206,6 +227,16 @@ impl TranaClient {
 
     pub async fn karma(&self, node_id: &str) -> Result<proto::KarmaResp> {
         self.call(proto::T_KARMA, &proto::KarmaReq { node_id: node_id.into() }).await
+    }
+
+    /// The full fused [`trana_core::karma::TrustScore`] for a node (social + compute + web-of-trust).
+    pub async fn trust_score(&self, node_id: &str) -> Result<trana_core::karma::TrustScore> {
+        Ok(self.karma(node_id).await?.trust)
+    }
+
+    /// Just the fused trust in 0.0–1.0 — "how much should I trust this node?".
+    pub async fn trust(&self, node_id: &str) -> Result<f64> {
+        Ok(self.karma(node_id).await?.trust.combined)
     }
 
     // ----- streams -----

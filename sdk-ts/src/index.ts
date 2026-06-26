@@ -17,6 +17,7 @@ import type {
   MediaKind,
   MediaRef,
   NodeId,
+  PersonalTrustResp,
   PostView,
   ProfileResp,
   ProposalView,
@@ -24,6 +25,7 @@ import type {
   Sort,
   StreamKind,
   StreamView,
+  TrustScore,
 } from "./types.js";
 
 export * from "./types.js";
@@ -47,6 +49,8 @@ const T = {
   comments: "trana/comments/v1",
   vote: "trana/vote/v1",
   follow: "trana/follow/v1",
+  deviceLink: "trana/device/link/v1",
+  trustGraph: "trana/trust/graph/v1",
   karma: "trana/karma/v1",
   streamStart: "trana/stream/start/v1",
   streamAppend: "trana/stream/append/v1",
@@ -180,6 +184,25 @@ export class Trana {
     return this.client.call(T.karma, { node_id: nodeId });
   }
 
+  /** Web of trust + reputation, the ergonomic way. */
+  readonly trust = {
+    /** The full fused [`TrustScore`] for a node (social + compute + web-of-trust). */
+    score: async (nodeId: NodeId): Promise<TrustScore> => (await this.karma(nodeId)).trust,
+    /** Just the fused trust in 0..1 — "how much should I trust this node?". */
+    of: async (nodeId: NodeId): Promise<number> => (await this.karma(nodeId)).trust.combined,
+    /** Personalized web-of-trust from `viewer`'s vantage point (for ranking a personalized feed).
+     *  Pass `nodes` to score those specifically, or omit to get the viewer's top-ranked nodes. */
+    personal: (viewer: NodeId, opts: { nodes?: NodeId[]; limit?: number } = {}): Promise<PersonalTrustResp> =>
+      this.client.call(T.trustGraph, { viewer, nodes: opts.nodes ?? [], limit: opts.limit ?? 50 }),
+  };
+
+  /** Device binding: a device consents to belong to an owner so its compute rolls into the owner's
+   *  trust. Run these FROM the device. The owner must also list the device in `profile.set({devices})`. */
+  readonly devices = {
+    link: (owner: NodeId): Promise<{ ok: boolean }> => this.client.call(T.deviceLink, { owner, active: true }),
+    unlink: (owner: NodeId): Promise<{ ok: boolean }> => this.client.call(T.deviceLink, { owner, active: false }),
+  };
+
   // ----- media (images / video / audio / podcasts / documents) -----
   readonly media = {
     /** Upload raw bytes to the content-addressed store; returns the object CID. */
@@ -245,10 +268,18 @@ export class Trana {
   vote(target: string, value: 1 | -1 | 0): Promise<{ ok: boolean }> {
     return this.client.call(T.vote, { target, value });
   }
+  /** Upvote a post/comment/document. */
+  upvote = (target: string) => this.vote(target, 1);
+  /** Downvote. */
+  downvote = (target: string) => this.vote(target, -1);
+  /** Clear your vote. */
+  unvote = (target: string) => this.vote(target, 0);
 
   follow(followee: NodeId, active = true): Promise<{ ok: boolean }> {
     return this.client.call(T.follow, { followee, active });
   }
+  /** Stop following. */
+  unfollow = (followee: NodeId) => this.follow(followee, false);
 
   // ----- feeds (the feed algorithm) -----
   /** A feed by scope + ranking. Convenience helpers below cover the common cases. */
