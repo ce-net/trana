@@ -9,9 +9,10 @@
 //! compute-trust half fetched live from CE.
 
 use anyhow::Result;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use trana_core::karma::{trust_score, ComputeTrust, Weights};
+use trana_core::karma::{trust_score, ComputeTrust, SocialKarma, Weights};
 use trana_core::model::{
     BanVote, BoardCreate, Body, Media, PolicyProposal, PolicyVote, Post, StreamEnd, StreamSegment,
     StreamStart,
@@ -36,11 +37,82 @@ pub struct Engine {
     compute: ComputeProbe,
     replicator: Replicator,
     weights: Weights,
+    /// Pre-trusted seed identities for the web of trust (operator-configured roots). Combined with
+    /// the in-log board creators when the graph is computed. Read from `TRANA_TRUST_ROOTS`
+    /// (comma-separated node ids).
+    roots: Vec<String>,
+    /// Cached web-of-trust ranks: `(record_count_at_compute, node -> rank)`. Recomputed lazily when
+    /// the store has grown, so reads don't pay a power iteration on an unchanged graph.
+    rank: RwLock<(usize, HashMap<String, f64>)>,
 }
 
 impl Engine {
     pub fn new(store: Arc<Store>, ce: ce_rs::CeClient, compute: ComputeProbe, replicator: Replicator) -> Self {
-        Engine { store, ce, compute, replicator, weights: Weights::default() }
+        let roots = std::env::var("TRANA_TRUST_ROOTS")
+            .ok()
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+            .unwrap_or_default();
+        Engine {
+            store,
+            ce,
+            compute,
+            replicator,
+            weights: Weights::default(),
+            roots,
+            // usize::MAX sentinel forces a compute on first trust read.
+            rank: RwLock::new((usize::MAX, HashMap::new())),
+        }
+    }
+
+    /// The current web-of-trust ranks, recomputing if the store grew since the cache was built.
+    /// Seeds = configured roots (weight 2.0) plus every board creator (weight 1.0). Deterministic in
+    /// the folded log + roots, so nodes sharing the same roots converge on the same ranks.
+    fn rank_snapshot(&self) -> HashMap<String, f64> {
+        let len = self.store.len();
+        {
+            let g = self.rank.read().unwrap();
+            if g.0 == len {
+                return g.1.clone();
+            }
+        }
+        let mut seeds: Vec<(String, f64)> = self.roots.iter().map(|r| (r.clone(), 2.0)).collect();
+        for c in self.store.board_creators() {
+            seeds.push((c, 1.0));
+        }
+        let map = self.store.trust_graph(&seeds, 0.85, 20);
+        let mut g = self.rank.write().unwrap();
+        *g = (len, map.clone());
+        map
+    }
+
+    /// The trust-weighted, time-decayed social aggregate for a node, using the web-of-trust rank as
+    /// each voter's weight. This is the karma view every trust decision reads.
+    fn weighted_social(&self, node_id: &str, rank: &HashMap<String, f64>) -> SocialKarma {
+        self.store.social_weighted(node_id, now_ms(), self.weights.half_life_secs, &|voter| {
+            rank.get(voter).copied().unwrap_or(0.0)
+        })
+    }
+
+    /// The node's own graph rank to feed the trust score: `Some(rank)` (0 if absent) when a graph was
+    /// computed so the graph term applies to everyone — an unconnected account is correctly penalized
+    /// — or `None` to drop the graph half when no graph exists at all (degraded).
+    fn graph_rank_of(node_id: &str, rank: &HashMap<String, f64>) -> Option<f64> {
+        if rank.is_empty() {
+            None
+        } else {
+            Some(rank.get(node_id).copied().unwrap_or(0.0))
+        }
+    }
+
+    /// A voter's weight for community ban tallying. Uses the web-of-trust rank (with a small floor so
+    /// engaged-but-unranked members still count toward a community verdict); falls back to the cheap
+    /// karma-based curve only when no graph exists at all.
+    fn voter_weight(&self, rank: &HashMap<String, f64>, node_id: &str) -> f64 {
+        if !rank.is_empty() {
+            return 0.05 + 0.95 * rank.get(node_id).copied().unwrap_or(0.0);
+        }
+        let karma = self.store.social(node_id).karma() as f64;
+        0.1 + 2.9 / (1.0 + (-karma / 50.0).exp())
     }
 
     /// Resolve the effective author of a write: normally the authenticated sender `from`, but if the
@@ -90,12 +162,14 @@ impl Engine {
         if requested == 0 { DEFAULT_REPLICAS } else { requested as usize }
     }
 
-    /// A user's fused trust (0.0–1.0): social karma + on-chain compute reputation across their devices.
+    /// A user's fused trust (0.0–1.0): trust-weighted social karma + on-chain compute reputation
+    /// across their devices + web-of-trust rank.
     async fn trust_of(&self, node_id: &str) -> f64 {
-        let social = self.store.social(node_id);
+        let rank = self.rank_snapshot();
+        let social = self.weighted_social(node_id, &rank);
         let devices = device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
-        trust_score(&social, &compute, &self.weights).combined
+        trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights).combined
     }
 
     /// Enforce a board's minimum-trust gate (sybil resistance). No-op when `min <= 0` (the common,
@@ -109,14 +183,6 @@ impl Engine {
             anyhow::bail!("{action} in this board requires trust >= {min:.2}; {who} has {t:.2}");
         }
         Ok(())
-    }
-
-    /// A cheap, in-store trust weight for community ban voting (respect): maps a voter's social
-    /// karma to a 0.1–3.0 weight so well-regarded members count more, sybils barely at all — without
-    /// a per-voter network lookup.
-    fn social_weight(&self, node_id: &str) -> f64 {
-        let karma = self.store.social(node_id).karma() as f64;
-        0.1 + 2.9 / (1.0 + (-karma / 50.0).exp())
     }
 
     /// Reject a writer who has been community-banned from `board`.
@@ -134,13 +200,15 @@ impl Engine {
         Ok(IdResp { id })
     }
 
-    /// A full profile response: stored profile + social karma + compute trust + the fused score.
+    /// A full profile response: stored profile + trust-weighted social karma + compute trust + the
+    /// fused score (with the web-of-trust term).
     pub async fn profile_get(&self, node_id: &str) -> Result<ProfileResp> {
         let profile = self.store.profile(node_id);
-        let social = self.store.social(node_id);
+        let rank = self.rank_snapshot();
+        let social = self.weighted_social(node_id, &rank);
         let devices = device_set(node_id, profile.as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
-        let trust = trust_score(&social, &compute, &self.weights);
+        let trust = trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights);
         Ok(ProfileResp { profile, social, compute, trust })
     }
 
@@ -231,10 +299,11 @@ impl Engine {
     // ----- karma -----
 
     pub async fn karma(&self, node_id: &str) -> Result<KarmaResp> {
-        let social = self.store.social(node_id);
+        let rank = self.rank_snapshot();
+        let social = self.weighted_social(node_id, &rank);
         let devices = device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
         let compute = self.compute.aggregate(&devices).await;
-        let trust = trust_score(&social, &compute, &self.weights);
+        let trust = trust_score(&social, &compute, Self::graph_rank_of(node_id, &rank), &self.weights);
         Ok(KarmaResp { social, compute, trust })
     }
 
@@ -340,10 +409,11 @@ impl Engine {
     pub fn ban_standing(&self, board: &str, target: &str) -> BanStandingResp {
         let standing = self.store.ban_standing(board, target);
         let policy = self.store.board_policy(board);
+        let rank = self.rank_snapshot();
         let mut w_support = 0.0;
         let mut w_total = 0.0;
         for (voter, support) in self.store.ban_votes_raw(board, target) {
-            let w = self.social_weight(&voter);
+            let w = self.voter_weight(&rank, &voter);
             w_total += w;
             if support {
                 w_support += w;

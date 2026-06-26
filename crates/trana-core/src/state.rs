@@ -11,6 +11,7 @@ use crate::model::{
     BanVote, BoardCreate, BoardPolicy, Body, Document, FileRef, Media, PolicyProposal, PolicyVote,
     Post, Profile, Ref, StreamSegment, StreamStart,
 };
+use crate::karma::decay;
 use crate::record::Record;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -119,6 +120,9 @@ struct BoardRec {
     /// The winning claim's (created_ms, record_id) — smallest wins, so ownership-of-the-name is
     /// deterministic regardless of arrival order.
     rank: (u64, String),
+    /// Author of the winning claim — a deterministic, in-log trust anchor used to seed the
+    /// web-of-trust propagation (the people who bootstrapped communities).
+    creator: String,
 }
 
 /// A document as returned to readers: the markdown artifact, its references (forward links), the
@@ -214,9 +218,11 @@ pub struct State {
     /// parent id -> child ids (direct replies).
     children: HashMap<String, Vec<String>>,
 
-    /// (voter, target) -> latest vote value (-1/0/+1).
-    votes: HashMap<(String, String), i8>,
-    /// target -> (ups, downs).
+    /// target -> voter -> (latest vote value -1/+1, the vote record's `created_ms`). Retaining the
+    /// voter identity and timestamp is what lets the node compute *trust-weighted, time-decayed*
+    /// scores (see [`State::weighted_score`]); the raw `tally` below stays for the cheap path.
+    target_votes: HashMap<String, HashMap<String, (i8, u64)>>,
+    /// target -> (ups, downs), raw one-vote-one-count.
     tally: HashMap<String, (u64, u64)>,
 
     /// (follower, followee) -> active.
@@ -273,7 +279,7 @@ impl State {
                 self.media.insert(r.id.clone(), (r.author.clone(), r.created_ms, m.clone()));
             }
             Body::Post(p) => self.apply_post(&r.id, &r.author, r.created_ms, p),
-            Body::Vote(v) => self.apply_vote(&r.author, &v.target, v.value),
+            Body::Vote(v) => self.apply_vote(&r.author, &v.target, v.value, r.created_ms),
             Body::Follow(f) => {
                 self.follows.insert((r.author.clone(), f.followee.clone()), f.active);
             }
@@ -281,7 +287,7 @@ impl State {
             Body::StreamSegment(s) => self.apply_stream_segment(&r.author, s),
             Body::StreamEnd(e) => self.apply_stream_end(&r.author, &e.stream, e.recording_cid.clone()),
             Body::Document(d) => self.apply_document(&r.id, &r.author, r.created_ms, d),
-            Body::BoardCreate(b) => self.apply_board_create(&r.id, r.created_ms, b),
+            Body::BoardCreate(b) => self.apply_board_create(&r.id, &r.author, r.created_ms, b),
             Body::BanVote(b) => self.apply_ban_vote(&r.author, b),
             Body::PolicyProposal(p) => {
                 self.proposals.insert(r.id.clone(), (r.author.clone(), r.created_ms, p.clone()));
@@ -315,30 +321,39 @@ impl State {
         );
     }
 
-    fn apply_vote(&mut self, voter: &str, target: &str, value: i8) {
+    fn apply_vote(&mut self, voter: &str, target: &str, value: i8, created_ms: u64) {
         let value = value.clamp(-1, 1);
-        let key = (voter.to_string(), target.to_string());
-        let prev = self.votes.get(&key).copied().unwrap_or(0);
+        let voters = self.target_votes.entry(target.to_string()).or_default();
+        let prev = voters.get(voter).map(|(v, _)| *v).unwrap_or(0);
         if prev == value {
+            // Same stance: keep the contribution, but advance the timestamp if this vote is newer so
+            // time-decay reflects the most recent expression of it.
+            if value != 0 {
+                if let Some(slot) = voters.get_mut(voter) {
+                    if created_ms > slot.1 {
+                        slot.1 = created_ms;
+                    }
+                }
+            }
             return;
         }
+        // Raw tally (disjoint field from target_votes; both borrows are fine).
         let (ups, downs) = self.tally.entry(target.to_string()).or_insert((0, 0));
-        // Undo previous contribution.
         match prev {
             1 => *ups = ups.saturating_sub(1),
             -1 => *downs = downs.saturating_sub(1),
             _ => {}
         }
-        // Apply new contribution.
         match value {
             1 => *ups += 1,
             -1 => *downs += 1,
             _ => {}
         }
+        // Reverse index (voter identity + timestamp), for trust-weighted / decayed scoring.
         if value == 0 {
-            self.votes.remove(&key);
+            voters.remove(voter);
         } else {
-            self.votes.insert(key, value);
+            voters.insert(voter.to_string(), (value, created_ms));
         }
     }
 
@@ -420,7 +435,7 @@ impl State {
         all
     }
 
-    fn apply_board_create(&mut self, id: &str, created_ms: u64, b: &BoardCreate) {
+    fn apply_board_create(&mut self, id: &str, author: &str, created_ms: u64, b: &BoardCreate) {
         let rank = (created_ms, id.to_string());
         match self.boards.get_mut(&b.board) {
             // First claim (smallest rank) wins the namespace + its params, deterministically.
@@ -430,6 +445,7 @@ impl State {
                 existing.policy = b.policy.clone();
                 existing.created_ms = created_ms;
                 existing.rank = rank;
+                existing.creator = author.to_string();
             }
             Some(_) => {} // a later/non-winning claim: ignore.
             None => {
@@ -441,6 +457,7 @@ impl State {
                         policy: b.policy.clone(),
                         created_ms,
                         rank,
+                        creator: author.to_string(),
                     },
                 );
             }
@@ -840,9 +857,43 @@ impl State {
         }
     }
 
-    /// The social-karma aggregate for a user — the substrate [`crate::karma`] turns into a score.
-    pub fn social(&self, node_id: &str) -> crate::karma::SocialKarma {
+    /// The trust-weighted, time-decayed net score of a single target: every distinct voter
+    /// contributes `sign(vote) * decay(age, half_life) * weight(voter)`. With `weight = |_| 1.0` and
+    /// `half_life_secs = 0` this is exactly the raw net score (`ups - downs`). This is the primitive
+    /// that makes a vote from a low-trust account barely move the needle.
+    pub fn weighted_score(
+        &self,
+        target: &str,
+        now_ms: u64,
+        half_life_secs: u64,
+        weight: &dyn Fn(&str) -> f64,
+    ) -> f64 {
+        match self.target_votes.get(target) {
+            None => 0.0,
+            Some(voters) => voters
+                .iter()
+                .map(|(voter, (val, ts))| {
+                    let age = now_ms.saturating_sub(*ts) / 1000;
+                    (*val as f64) * decay(age, half_life_secs) * weight(voter)
+                })
+                .sum(),
+        }
+    }
+
+    /// The social-karma aggregate for a user, with the **effective** score computed under a voter
+    /// `weight` function and time-decay (`half_life_secs`). The raw counts (posts, comments,
+    /// up/downvotes, raw net scores, followers) are unaffected — only `effective_score` reflects the
+    /// weighting. Pass `weight = |_| 1.0`, `half_life_secs = 0` for the raw, undecayed aggregate
+    /// (see [`State::social`]).
+    pub fn social_weighted(
+        &self,
+        node_id: &str,
+        now_ms: u64,
+        half_life_secs: u64,
+        weight: &dyn Fn(&str) -> f64,
+    ) -> crate::karma::SocialKarma {
         let mut k = crate::karma::SocialKarma::default();
+        let mut effective = 0.0_f64;
         for (id, sp) in &self.posts {
             if sp.author != node_id {
                 continue;
@@ -858,8 +909,9 @@ impl State {
                 k.comments += 1;
                 k.comment_score += net;
             }
+            effective += self.weighted_score(id, now_ms, half_life_secs, weight);
         }
-        // Documents are votable content too: their net score counts toward the author's karma.
+        // Documents are votable content too: their score counts toward the author's karma.
         for (id, (a, _, _)) in &self.documents {
             if a != node_id {
                 continue;
@@ -868,9 +920,101 @@ impl State {
             k.upvotes += ups;
             k.downvotes += downs;
             k.post_score += ups as i64 - downs as i64;
+            effective += self.weighted_score(id, now_ms, half_life_secs, weight);
         }
         k.followers = self.followers(node_id).len() as u64;
+        k.effective_score = effective;
         k
+    }
+
+    /// The raw social-karma aggregate (every voter counts 1, no decay). `effective_score` equals the
+    /// raw [`crate::karma::SocialKarma::karma`]. The node uses [`State::social_weighted`] with a
+    /// real voter-trust weight; this is the cheap, weightless view for clients without a rank table.
+    pub fn social(&self, node_id: &str) -> crate::karma::SocialKarma {
+        self.social_weighted(node_id, 0, 0, &|_| 1.0)
+    }
+
+    /// Author of every explicitly-created board (deduplicated) — the in-log, deterministic seed set
+    /// for [`State::trust_graph`]: the people the community let bootstrap its spaces.
+    pub fn board_creators(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.boards.values().map(|b| b.creator.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Web-of-trust propagation: a personalized PageRank over the **follow graph** (a follow is a
+    /// vouch from follower → followee), restarting to `seeds` (the pre-trusted anchor set, e.g.
+    /// board creators + configured roots). Returns each reachable node's rank normalized so the most
+    /// trusted node is `1.0`. Deterministic in the folded follow set + seeds, so every node computes
+    /// the same ranks. A sybil ring that only follows itself has no inbound edge from the
+    /// seed-connected component, so its rank stays ~0 no matter how densely it cross-follows — which
+    /// is what stops cheap karma farming when this rank weights votes.
+    pub fn trust_graph(
+        &self,
+        seeds: &[(String, f64)],
+        damping: f64,
+        iters: usize,
+    ) -> HashMap<String, f64> {
+        // Adjacency over active follows.
+        let mut out: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut nodes: HashSet<&str> = HashSet::new();
+        for ((f, fe), active) in &self.follows {
+            if *active {
+                out.entry(f.as_str()).or_default().push(fe.as_str());
+                nodes.insert(f.as_str());
+                nodes.insert(fe.as_str());
+            }
+        }
+        // Personalization (restart) vector from the seeds, normalized to sum 1.
+        let mut seed: HashMap<&str, f64> = HashMap::new();
+        let seed_sum: f64 = seeds.iter().map(|(_, w)| w.max(0.0)).sum();
+        if seed_sum > 0.0 {
+            for (n, w) in seeds {
+                let w = w.max(0.0);
+                if w > 0.0 {
+                    nodes.insert(n.as_str());
+                    *seed.entry(n.as_str()).or_insert(0.0) += w / seed_sum;
+                }
+            }
+        } else {
+            // No seeds: uniform restart over all nodes — still useful for ranking, but weaker sybil
+            // resistance (no trust anchor). Callers should supply seeds in production.
+            if nodes.is_empty() {
+                return HashMap::new();
+            }
+            let u = 1.0 / nodes.len() as f64;
+            for n in &nodes {
+                seed.insert(n, u);
+            }
+        }
+        let damping = damping.clamp(0.0, 0.99);
+        let mut rank: HashMap<&str, f64> = seed.clone();
+        for _ in 0..iters.max(1) {
+            let mut next: HashMap<&str, f64> = HashMap::new();
+            for (n, s) in &seed {
+                *next.entry(n).or_insert(0.0) += (1.0 - damping) * s;
+            }
+            for (src, dsts) in &out {
+                let r = rank.get(src).copied().unwrap_or(0.0);
+                if r <= 0.0 || dsts.is_empty() {
+                    continue;
+                }
+                let share = damping * r / dsts.len() as f64;
+                for d in dsts {
+                    *next.entry(d).or_insert(0.0) += share;
+                }
+            }
+            rank = next;
+        }
+        // Normalize so the top node is 1.0 → ranks read as a 0..1 trust fraction.
+        let max = rank.values().copied().fold(0.0_f64, f64::max);
+        if max > 0.0 {
+            for v in rank.values_mut() {
+                *v /= max;
+            }
+        }
+        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 }
 
@@ -1110,6 +1254,70 @@ mod tests {
         assert_eq!(k.comments, 1);
         assert_eq!(k.post_score, 2);
         assert_eq!(k.comment_score, -1);
+        // Raw social() => effective_score equals raw karma (every voter counts 1, no decay).
+        assert!((k.effective_score - k.karma() as f64).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_karma_is_trust_weighted() {
+        // The Reddit-reliability property: karma you cannot farm. A post upvoted by one trusted
+        // member and a swarm of zero-trust sybils earns ~1 effective karma, not 3.
+        let mut s = State::new();
+        let author = "aa".repeat(32);
+        let trusted = "bb".repeat(32);
+        let sybil1 = "c1".repeat(32);
+        let sybil2 = "c2".repeat(32);
+        let r = root(&author, "b", 1, "t");
+        s.apply(&r);
+        s.apply(&vote(&trusted, 10, &r.id, 1));
+        s.apply(&vote(&sybil1, 10, &r.id, 1));
+        s.apply(&vote(&sybil2, 10, &r.id, 1));
+        assert_eq!(s.social(&author).karma(), 3, "raw karma counts every vote");
+        let weight = |v: &str| if v == trusted.as_str() { 1.0 } else { 0.0 };
+        let k = s.social_weighted(&author, 100_000, 0, &weight);
+        assert!((k.effective_score - 1.0).abs() < 1e-9, "only the trusted upvote moves karma");
+        assert_eq!(k.karma(), 3, "raw counts are untouched by weighting");
+    }
+
+    #[test]
+    fn weighted_score_decays_with_age() {
+        let mut s = State::new();
+        let author = "aa".repeat(32);
+        let voter = "bb".repeat(32);
+        let r = root(&author, "b", 0, "t");
+        s.apply(&r);
+        s.apply(&vote(&voter, 0, &r.id, 1)); // vote at t = 0 ms
+        let unit = |_: &str| 1.0;
+        let fresh = s.weighted_score(&r.id, 0, 100, &unit);
+        let aged = s.weighted_score(&r.id, 100_000, 100, &unit); // 100 s old, 100 s half-life
+        assert!((fresh - 1.0).abs() < 1e-9);
+        assert!((aged - 0.5).abs() < 1e-9, "one half-life halves the vote weight, got {aged}");
+    }
+
+    #[test]
+    fn trust_graph_isolates_sybil_ring() {
+        // A seed vouches (follows) one honest node. A dense sybil ring only cross-follows itself.
+        // Seeded propagation gives the honest node real rank and the ring ~0 — so cross-voting
+        // cannot bootstrap trust.
+        let mut s = State::new();
+        let seed = "aa".repeat(32);
+        let honest = "bb".repeat(32);
+        let s1 = "c1".repeat(32);
+        let s2 = "c2".repeat(32);
+        let s3 = "c3".repeat(32);
+        let follow = |a: &str, b: &str, t: u64| {
+            Record::new(a, t, Body::Follow(Follow { followee: b.into(), active: true })).unwrap()
+        };
+        s.apply(&follow(&seed, &honest, 1));
+        s.apply(&follow(&s1, &s2, 1));
+        s.apply(&follow(&s2, &s3, 1));
+        s.apply(&follow(&s3, &s1, 1));
+        s.apply(&follow(&s1, &s3, 1));
+        let ranks = s.trust_graph(&[(seed.clone(), 1.0)], 0.85, 30);
+        let honest_rank = ranks.get(&honest).copied().unwrap_or(0.0);
+        let sybil_rank = ranks.get(&s1).copied().unwrap_or(0.0);
+        assert!(honest_rank > 0.5, "seed-vouched node gains real rank, got {honest_rank}");
+        assert!(sybil_rank < 1e-6, "isolated sybil ring stays ~0, got {sybil_rank}");
     }
 
     #[test]

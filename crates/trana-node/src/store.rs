@@ -105,6 +105,34 @@ impl Store {
         self.state.lock().unwrap().social(node_id)
     }
 
+    /// Trust-weighted, time-decayed social aggregate (the node's real karma view). `weight` maps a
+    /// voter to their trust weight (its web-of-trust rank).
+    pub fn social_weighted(
+        &self,
+        node_id: &str,
+        now_ms: u64,
+        half_life_secs: u64,
+        weight: &dyn Fn(&str) -> f64,
+    ) -> SocialKarma {
+        self.state.lock().unwrap().social_weighted(node_id, now_ms, half_life_secs, weight)
+    }
+
+    /// Web-of-trust ranks over the follow graph, restarting to `seeds`. See
+    /// [`trana_core::state::State::trust_graph`].
+    pub fn trust_graph(
+        &self,
+        seeds: &[(String, f64)],
+        damping: f64,
+        iters: usize,
+    ) -> std::collections::HashMap<String, f64> {
+        self.state.lock().unwrap().trust_graph(seeds, damping, iters)
+    }
+
+    /// Board creators — the in-log seed anchor for the web of trust.
+    pub fn board_creators(&self) -> Vec<String> {
+        self.state.lock().unwrap().board_creators()
+    }
+
     pub fn media(&self, media_id: &str) -> Option<Media> {
         self.state.lock().unwrap().media(media_id)
     }
