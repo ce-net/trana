@@ -1,0 +1,26 @@
+{
+  "name": "@ce-net/trana",
+  "version": "0.1.0",
+  "description": "Type-safe TypeScript SDK for trana — the distributed social/content + trust backend. Discovery, failover, and content addressing handled for you.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["trana", "ce-net", "distributed", "social", "sdk", "p2p"],
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

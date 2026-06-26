@@ -145,6 +145,12 @@ enum Cmd {
         /// Visibility grace window (seconds) for new posts.
         #[arg(long, default_value_t = 21600)]
         grace_secs: u64,
+        /// Distinct-voter quorum required before a community ban can take effect.
+        #[arg(long, default_value_t = 10)]
+        ban_quorum: u32,
+        /// Trust-weighted support fraction (0.0-1.0) required to ban.
+        #[arg(long, default_value_t = 0.66)]
+        ban_support: f64,
     },
     /// Show a board's metadata + params.
     Board { board: String },
@@ -365,11 +371,22 @@ async fn main() -> Result<()> {
             print_json(&t.streams_live().await?)?;
         }
 
-        Cmd::BoardCreate { board, title, description, min_trust_post, min_trust_vote, grace_secs } => {
+        Cmd::BoardCreate {
+            board,
+            title,
+            description,
+            min_trust_post,
+            min_trust_vote,
+            grace_secs,
+            ban_quorum,
+            ban_support,
+        } => {
             let mut policy = trana_core::BoardPolicy::default();
             policy.min_trust_to_post = min_trust_post;
             policy.min_trust_to_vote = min_trust_vote;
             policy.grace_secs = grace_secs;
+            policy.ban_quorum = ban_quorum;
+            policy.ban_support = ban_support;
             let r = t.board_put(BoardPutReq { board, title, description, policy }).await?;
             println!("{}", r.id);
         }
