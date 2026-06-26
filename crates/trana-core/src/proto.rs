@@ -41,11 +41,14 @@ pub const T_STREAMS_LIVE: &str = "trana/streams/live/v1";
 /// Internal replication RPC: "please pull + pin this record/object".
 pub const T_REPLICATE: &str = "trana/replicate/v1";
 
-// ----- documents + content addressing -----
+// ----- documents + content addressing + versioning -----
 pub const T_DOC_PUT: &str = "trana/document/put/v1";
 pub const T_DOC_GET: &str = "trana/document/get/v1";
 pub const T_DOCS_BY: &str = "trana/documents/by/v1";
 pub const T_BACKLINKS: &str = "trana/backlinks/v1";
+pub const T_DOC_HISTORY: &str = "trana/document/history/v1";
+pub const T_DOC_LATEST: &str = "trana/document/latest/v1";
+pub const T_DOC_DIFF: &str = "trana/document/diff/v1";
 
 // ----- community governance -----
 pub const T_BOARD_PUT: &str = "trana/board/put/v1";
@@ -88,6 +91,13 @@ pub const RPC_TOPICS: &[&str] = &[
     T_POLICY_VOTE,
     T_PROPOSALS,
     T_PROPOSAL_GET,
+    T_DOC_PUT,
+    T_DOC_GET,
+    T_DOCS_BY,
+    T_BACKLINKS,
+    T_DOC_HISTORY,
+    T_DOC_LATEST,
+    T_DOC_DIFF,
 ];
 
 /// The reply envelope on every topic. `ok` distinguishes success (decode `data` as the topic's
@@ -466,6 +476,74 @@ pub struct ProposalGetReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposalResp {
     pub proposal: Option<crate::state::ProposalView>,
+}
+
+// ----- documents + versioning -----
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocPutReq {
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub file: Option<crate::model::FileRef>,
+    #[serde(default)]
+    pub refs: Vec<crate::model::Ref>,
+    #[serde(default)]
+    pub board: Option<String>,
+    /// Series id when publishing a NEW VERSION of an existing document (omit to start a new series).
+    #[serde(default)]
+    pub series: Option<String>,
+    /// The version this supersedes (the current latest id), when publishing a new version.
+    #[serde(default)]
+    pub prev: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocGetReq {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocResp {
+    pub document: Option<crate::state::DocumentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsResp {
+    pub documents: Vec<crate::state::DocumentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocsByReq {
+    pub author: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocKeyReq {
+    /// Any version id or the series id.
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklinksReq {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacklinksResp {
+    pub uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocDiffReq {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocDiffResp {
+    pub diff: Vec<crate::state::DiffLine>,
 }
 
 /// Build the [`Body`] for a profile from a put request.

@@ -364,6 +364,51 @@ impl Engine {
         ProposalResp { proposal: self.store.proposal(id) }
     }
 
+    // ----- documents + versioning -----
+
+    /// Create a document or publish a new version of one. If the document declares a board, the
+    /// board's post-trust gate and ban list apply (same community rules as posts). The bytes of a
+    /// file payload are replicated to nearby nodes.
+    pub async fn document_put(&self, author: &str, req: DocPutReq) -> Result<IdResp> {
+        if let Some(board) = &req.board {
+            self.deny_if_banned(board, author)?;
+            self.require_trust(author, self.store.board_policy(board).min_trust_to_post, "publishing")
+                .await?;
+        }
+        let object_cids: Vec<String> = req.file.as_ref().map(|f| vec![f.object_cid.clone()]).unwrap_or_default();
+        let replicas = if object_cids.is_empty() { 0 } else { DEFAULT_REPLICAS };
+        let body = Body::Document(trana_core::model::Document {
+            title: req.title,
+            body: req.body,
+            file: req.file,
+            refs: req.refs,
+            board: req.board,
+            series: req.series,
+            prev: req.prev,
+        });
+        let id = self.write(author, body, object_cids, replicas).await?;
+        Ok(IdResp { id })
+    }
+
+    pub fn document_get(&self, id: &str) -> DocResp {
+        DocResp { document: self.store.document(id) }
+    }
+    pub fn document_history(&self, key: &str) -> DocsResp {
+        DocsResp { documents: self.store.document_history(key) }
+    }
+    pub fn document_latest(&self, key: &str) -> DocResp {
+        DocResp { document: self.store.document_latest(key) }
+    }
+    pub fn document_diff(&self, from: &str, to: &str) -> DocDiffResp {
+        DocDiffResp { diff: self.store.document_diff(from, to) }
+    }
+    pub fn documents_by(&self, author: &str) -> DocsResp {
+        DocsResp { documents: self.store.documents_by(author) }
+    }
+    pub fn backlinks(&self, id: &str) -> BacklinksResp {
+        BacklinksResp { uris: self.store.backlinks(id) }
+    }
+
     // ----- replication (internal) -----
 
     /// Handle a directed replication push: ingest the record and pull its objects.

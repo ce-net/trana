@@ -106,6 +106,32 @@ impl TranaService {
                 Ok(r) => Envelope::ok(&self.engine.proposal_get(&r.id)),
                 Err(e) => Envelope::err(e),
             },
+            // ----- documents + versioning -----
+            proto::T_DOC_PUT => self.write_reply(parse(p).map(|r| self.engine.document_put(from, r))).await,
+            proto::T_DOC_GET => match parse::<proto::DocGetReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.document_get(&r.id)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_DOCS_BY => match parse::<proto::DocsByReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.documents_by(&r.author)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_BACKLINKS => match parse::<proto::BacklinksReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.backlinks(&r.id)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_DOC_HISTORY => match parse::<proto::DocKeyReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.document_history(&r.key)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_DOC_LATEST => match parse::<proto::DocKeyReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.document_latest(&r.key)),
+                Err(e) => Envelope::err(e),
+            },
+            proto::T_DOC_DIFF => match parse::<proto::DocDiffReq>(p) {
+                Ok(r) => Envelope::ok(&self.engine.document_diff(&r.from, &r.to)),
+                Err(e) => Envelope::err(e),
+            },
             proto::T_REPLICATE => Envelope::ok(&self.engine.replicate(p).await),
             other => Envelope::err(format!("unknown topic: {other}")),
         }

@@ -166,6 +166,27 @@ impl Store {
     pub fn home_feed(&self, viewer: &str, sort: SortBy, limit: usize, now_ms: u64) -> Vec<PostView> {
         self.state.lock().unwrap().home_feed(viewer, sort, limit, now_ms)
     }
+
+    // ----- documents + versioning -----
+
+    pub fn document(&self, id: &str) -> Option<trana_core::state::DocumentView> {
+        self.state.lock().unwrap().document(id)
+    }
+    pub fn document_history(&self, key: &str) -> Vec<trana_core::state::DocumentView> {
+        self.state.lock().unwrap().document_history(key)
+    }
+    pub fn document_latest(&self, key: &str) -> Option<trana_core::state::DocumentView> {
+        self.state.lock().unwrap().document_latest(key)
+    }
+    pub fn document_diff(&self, from: &str, to: &str) -> Vec<trana_core::state::DiffLine> {
+        self.state.lock().unwrap().document_diff(from, to)
+    }
+    pub fn documents_by(&self, author: &str) -> Vec<trana_core::state::DocumentView> {
+        self.state.lock().unwrap().documents_by(author)
+    }
+    pub fn backlinks(&self, id: &str) -> Vec<String> {
+        self.state.lock().unwrap().backlinks(id)
+    }
 }
 
 #[cfg(test)]

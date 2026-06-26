@@ -1408,8 +1408,11 @@ mod tests {
             Body::Document(Document {
                 title: "essay".into(),
                 body: format!("citing trana://post/{}", p0.id),
+                file: None,
                 refs: vec![Ref::media("m9")],
                 board: Some("b".into()),
+                series: None,
+                prev: None,
             }),
         )
         .unwrap();
@@ -1425,5 +1428,54 @@ mod tests {
         assert_eq!(s.document(&doc.id).unwrap().score, 1);
         assert_eq!(s.social(&a).post_score, 1);
         assert_eq!(s.documents_by(&a).len(), 1);
+    }
+
+    fn doc(author: &str, t: u64, title: &str, body: &str, series: Option<&str>, prev: Option<&str>) -> Record {
+        Record::new(
+            author,
+            t,
+            Body::Document(Document {
+                title: title.into(),
+                body: body.into(),
+                file: None,
+                refs: vec![],
+                board: None,
+                series: series.map(|s| s.into()),
+                prev: prev.map(|s| s.into()),
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn documents_are_versioned_and_diffable() {
+        let mut s = State::new();
+        let a = "aa".repeat(32);
+        let v1 = doc(&a, 1, "notes", "line one\nline two\n", None, None);
+        s.apply(&v1);
+        let v2 = doc(&a, 2, "notes", "line one\nline two changed\nline three\n", Some(&v1.id), Some(&v1.id));
+        s.apply(&v2);
+        let v3 = doc(&a, 3, "notes", "line one\nline two changed\nline three\n", Some(&v1.id), Some(&v2.id));
+        s.apply(&v3);
+
+        // History is the full chain, oldest -> newest.
+        let hist = s.document_history(&v2.id);
+        assert_eq!(hist.iter().map(|d| d.id.clone()).collect::<Vec<_>>(), vec![v1.id.clone(), v2.id.clone(), v3.id.clone()]);
+        // Version numbering + latest flag.
+        assert_eq!(s.document(&v1.id).unwrap().version, 1);
+        assert_eq!(s.document(&v2.id).unwrap().version, 2);
+        assert_eq!(s.document(&v2.id).unwrap().versions, 3);
+        assert!(!s.document(&v2.id).unwrap().is_latest);
+        assert!(s.document(&v3.id).unwrap().is_latest);
+        assert_eq!(s.document_latest(&v1.id).unwrap().id, v3.id);
+
+        // Diff v1 -> v2: line two replaced, line three added.
+        let d = s.document_diff(&v1.id, &v2.id);
+        assert!(d.iter().any(|l| l.op == "-" && l.text == "line two"));
+        assert!(d.iter().any(|l| l.op == "+" && l.text == "line two changed"));
+        assert!(d.iter().any(|l| l.op == "+" && l.text == "line three"));
+        // The series collapses to one identity despite three records.
+        assert_eq!(s.documents_by(&a).len(), 3); // each version is a record...
+        assert_eq!(s.document_history(&v1.id).len(), 3); // ...but they share one series.
     }
 }
