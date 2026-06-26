@@ -12,7 +12,10 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use trana_core::karma::{trust_score, ComputeTrust, Weights};
-use trana_core::model::{Body, Media, Post, StreamEnd, StreamSegment, StreamStart};
+use trana_core::model::{
+    BanVote, BoardCreate, Body, Media, PolicyProposal, PolicyVote, Post, StreamEnd, StreamSegment,
+    StreamStart,
+};
 use trana_core::proto::*;
 use trana_core::record::Record;
 use trana_core::state::SortBy;
@@ -67,6 +70,43 @@ impl Engine {
         if requested == 0 { DEFAULT_REPLICAS } else { requested as usize }
     }
 
+    /// A user's fused trust (0.0–1.0): social karma + on-chain compute reputation across their devices.
+    async fn trust_of(&self, node_id: &str) -> f64 {
+        let social = self.store.social(node_id);
+        let devices = device_set(node_id, self.store.profile(node_id).as_ref().map(|p| &p.profile.devices));
+        let compute = self.compute.aggregate(&devices).await;
+        trust_score(&social, &compute, &self.weights).combined
+    }
+
+    /// Enforce a board's minimum-trust gate (sybil resistance). No-op when `min <= 0` (the common,
+    /// fast path — we only pay the compute-trust lookup when a board actually requires trust).
+    async fn require_trust(&self, who: &str, min: f64, action: &str) -> Result<()> {
+        if min <= 0.0 {
+            return Ok(());
+        }
+        let t = self.trust_of(who).await;
+        if t < min {
+            anyhow::bail!("{action} in this board requires trust >= {min:.2}; {who} has {t:.2}");
+        }
+        Ok(())
+    }
+
+    /// A cheap, in-store trust weight for community ban voting (respect): maps a voter's social
+    /// karma to a 0.1–3.0 weight so well-regarded members count more, sybils barely at all — without
+    /// a per-voter network lookup.
+    fn social_weight(&self, node_id: &str) -> f64 {
+        let karma = self.store.social(node_id).karma() as f64;
+        0.1 + 2.9 / (1.0 + (-karma / 50.0).exp())
+    }
+
+    /// Reject a writer who has been community-banned from `board`.
+    fn deny_if_banned(&self, board: &str, who: &str) -> Result<()> {
+        if self.store.ban_standing(board, who).banned_raw {
+            anyhow::bail!("the community has banned {who} from board '{board}'");
+        }
+        Ok(())
+    }
+
     // ----- profile -----
 
     pub async fn profile_put(&self, author: &str, req: ProfilePutReq) -> Result<IdResp> {
@@ -112,6 +152,10 @@ impl Engine {
     // ----- posts / threads / comments -----
 
     pub async fn post_create(&self, author: &str, req: PostCreateReq) -> Result<IdResp> {
+        // Community gates: banned users can't post; boards may require a trust floor (anti-spam).
+        self.deny_if_banned(&req.board, author)?;
+        self.require_trust(author, self.store.board_policy(&req.board).min_trust_to_post, "posting")
+            .await?;
         let body = Body::Post(Post {
             board: req.board,
             parent: req.parent,
@@ -141,6 +185,13 @@ impl Engine {
     // ----- vote / follow -----
 
     pub async fn vote(&self, author: &str, req: VoteReq) -> Result<OkResp> {
+        // If the target is a post in a board with a vote-trust floor (or the voter is banned there),
+        // enforce it. Targets that aren't posts (or open boards) vote freely.
+        if let Some(post) = self.store.post(&req.target) {
+            self.deny_if_banned(&post.board, author)?;
+            self.require_trust(author, self.store.board_policy(&post.board).min_trust_to_vote, "voting")
+                .await?;
+        }
         self.write(author, Body::Vote(trana_core::model::Vote { target: req.target, value: req.value }), vec![], 0)
             .await?;
         Ok(OkResp { ok: true })
