@@ -120,12 +120,27 @@ trana stream-append <stream-id> 0 ./seg0.ts --duration-ms 2000
 trana karma <node-id>                                   # social + compute trust
 ```
 
-## Deploy + orchestrate with ce-gke
+## Deploy with ce-appmgr (`ce app`) — the easy path
 
-trana ships a ce-gke Deployment manifest ([`deploy/trana.gke.yaml`](deploy/trana.gke.yaml)) so the
-backend runs as a self-healing, replicated mesh service: ce-gke places N replicas across
-docker-capable hosts, keeps that many Running, replaces any that die, and advertises the healthy set
-as `ce-gke/social/trana-api` for `ce_rs::locate`.
+The backend deploys as a ce-appmgr package: publish once, then install on any node — or your whole
+fleet — with one command. `ce app` fetches the right per-host binary by content hash from the mesh,
+verifies it, supervises it (restart on failure), and registers the live instance.
+
+```bash
+./deploy/publish.sh                                  # build + content-address + sign + publish
+ce app install trana-node --on fleet=mine --yes      # 1 command, every paired device
+ce app daemon enable trana-node                       # supervise it (serves trana/* forever)
+```
+
+Browser frontends do not run the backend; they reach a live trana-node over the mesh with the
+`@ce-net/trana` TS SDK (`new Trana({ node: "/ce" })`). Full guide: [`deploy/README.md`](deploy/README.md).
+
+### Alternative: orchestrate a replicated fleet with ce-gke
+
+For a self-healing pool of N containerized replicas, trana also ships a ce-gke Deployment manifest
+([`deploy/trana.gke.yaml`](deploy/trana.gke.yaml)): ce-gke places N replicas across docker-capable
+hosts, keeps that many Running, replaces any that die, and advertises the healthy set as
+`ce-gke/social/trana-api` for `ce_rs::locate`.
 
 ```bash
 ce-gke --grant <cap-token> apply -f trana/deploy/trana.gke.yaml
