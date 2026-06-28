@@ -16,7 +16,7 @@ authors = ["Leif Rydenfalk <ledamecrydenfalk@gmail.com>"]
 
 [workspace.dependencies]
 # Local CE SDK (mesh request/reply + content-addressed blobs + atlas/history).
-ce-rs = { path = "../ce-rs", features = ["serve", "locate"] }
+ce-rs = { git = "https://github.com/ce-net/ce-rs", features = ["serve", "locate"] }
 
 # Pure, WASM-clean deps used by trana-core (no tokio/reqwest/libp2p).
 serde = { version = "1", features = ["derive"] }
