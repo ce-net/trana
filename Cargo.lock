@@ -85,6 +85,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
 name = "axum"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,6 +216,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ce-economy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ce-rs",
+ "futures-core",
+ "futures-util",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ce-identity"
 version = "0.1.0"
 dependencies = [
@@ -218,6 +236,29 @@ dependencies = [
  "hex",
  "rand 0.8.6",
  "serde",
+ "sha2",
+]
+
+[[package]]
+name = "ce-lane"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "libc",
+ "nix",
+ "serde",
+]
+
+[[package]]
+name = "ce-ratio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ce-economy",
+ "ce-rs",
+ "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -226,7 +267,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "ce-lane",
  "directories",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "hex",
@@ -886,6 +929,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +952,19 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -1747,6 +1812,7 @@ dependencies = [
  "anyhow",
  "axum",
  "ce-cap",
+ "ce-ratio",
  "ce-rs",
  "clap",
  "directories",

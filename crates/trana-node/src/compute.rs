@@ -37,7 +37,7 @@ impl ComputeProbe {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
         for dev in devices {
-            let hist = self.ce.history(dev).await.ok();
+            let hist = ce_ratio::history::history(&self.ce, dev).await.ok();
             let entry = atlas.iter().find(|e| &e.node_id == dev);
 
             let (jobs, hbeats, expiries, earned) = match &hist {
@@ -78,7 +78,7 @@ impl ComputeProbe {
         atlas.truncate(max);
         let mut seeds = Vec::new();
         for e in atlas {
-            if let Ok(h) = self.ce.history(&e.node_id).await {
+            if let Ok(h) = ce_ratio::history::history(&self.ce, &e.node_id).await {
                 let delivered = h.jobs_hosted + h.heartbeats_hosted;
                 if delivered > 0 {
                     let w = (delivered as f64).ln_1p().min(3.0);

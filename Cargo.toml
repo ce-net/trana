@@ -17,6 +17,8 @@ authors = ["Leif Rydenfalk <ledamecrydenfalk@gmail.com>"]
 [workspace.dependencies]
 # Local CE SDK (mesh request/reply + content-addressed blobs + atlas/history).
 ce-rs = { git = "https://github.com/ce-net/ce-rs", features = ["serve", "locate"] }
+# Trust ceapp: reputation history (`ce_ratio::history::history`) — moved out of the core SDK.
+ce-ratio = { git = "https://github.com/ce-net/ce-ratio" }
 
 # Pure, WASM-clean deps used by trana-core (no tokio/reqwest/libp2p).
 serde = { version = "1", features = ["derive"] }
