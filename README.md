@@ -152,10 +152,10 @@ ce-gke run --every 10        # reconcile/heal forever
 - `cargo test --workspace` — 24 unit tests (records, read-model fold, karma/trust, store).
 - `ce-gke/tests/trana_e2e.rs` — deterministic e2e: ce-gke deploys trana and self-heals under random
   replica/node failure, scale, and rolling update (4/4 green; `cargo test -p ce-gke --test trana_e2e`).
-- `~/ce-net/e2e/e2e-trana.sh` — hermetic live mesh: two trana nodes on a real CE mesh; proves
-  cross-node gossip replication, object replication, the trust API, and fault tolerance (content
-  survives a trana node + a CE node being killed). Run: `CE_BIN=~/.local/bin/ce e2e/e2e-trana.sh`.
-- `~/ce-net/e2e/e2e-trana-gke.sh` — live ce-gke deploy + heal against real docker hosts.
+- `e2e-trana.sh` (in the ce-net e2e suite, github.com/ce-net/e2e) — hermetic live mesh: two trana
+  nodes on a real CE mesh; proves cross-node gossip replication, object replication, the trust API,
+  and fault tolerance (content survives a trana node + a CE node being killed).
+- `e2e-trana-gke.sh` (same suite) — live ce-gke deploy + heal against real docker hosts.
 
 ## Status
 
